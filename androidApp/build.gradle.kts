@@ -23,6 +23,12 @@ android {
         }
     }
     signingConfigs {
+        create("nightly") {
+            storeFile = System.getenv("NIGHTLY_KEYSTORE_PATH")?.let { file(it) }
+            storePassword = System.getenv("NIGHTLY_KEYSTORE_PASSWORD")
+            keyAlias = System.getenv("NIGHTLY_KEY_ALIAS")
+            keyPassword = System.getenv("NIGHTLY_KEY_PASSWORD")
+        }
         create("selfSigned") {
             storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
             storePassword = "android"
@@ -51,6 +57,14 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+        }
+
+        create("nightly") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".rpmlourenco.nightly"
+            versionNameSuffix = "-nightly"
+            signingConfig = signingConfigs.getByName("nightly")
+            matchingFallbacks += listOf("release")
         }
 
         create("selfSignedRelease") {
@@ -176,6 +190,12 @@ val generateLocalesConfig = tasks.register<GenerateLocalesConfig>("generateLocal
 
 androidComponents {
     onVariants { variant ->
+        if (variant.buildType == "nightly") {
+            val code = providers.gradleProperty("nightlyVersionCode")
+                .map { it.toInt() }
+                .orElse(1)
+            variant.outputs.forEach { it.versionCode.set(code) }
+        }
         variant.sources.res?.addGeneratedSourceDirectory(
             generateLocalesConfig,
             GenerateLocalesConfig::outputDir

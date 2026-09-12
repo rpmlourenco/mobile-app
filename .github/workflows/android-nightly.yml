@@ -1,0 +1,131 @@
+name: Android Nightly
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: '0 3 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: android-nightly
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.repository == 'rpmlourenco/mobile-app'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check for an already published commit
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHA=$(git rev-parse HEAD)
+          TAG="nightly-${SHA}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          # A release with its APK is the success marker, not a tag or draft.
+          # API errors fail the job instead of being treated as missing releases.
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" > releases.json
+          if jq -e --arg tag "$TAG" 'any(.[]; .tag_name == $tag and .draft == false and any(.assets[]; .name | endswith(".apk")))' releases.json >/dev/null; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Already published $SHA" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+          # UTC minutes since 2026-01-01: monotonic across commits and reruns.
+          echo "code=$(( ($(date +%s) - 1767225600) / 60 ))" >> "$GITHUB_OUTPUT"
+          rm releases.json
+
+      - name: Validate signing secrets
+        if: steps.version.outputs.build == 'true'
+        env:
+          NIGHTLY_KEYSTORE_BASE64: ${{ secrets.NIGHTLY_KEYSTORE_BASE64 }}
+          NIGHTLY_KEYSTORE_PASSWORD: ${{ secrets.NIGHTLY_KEYSTORE_PASSWORD }}
+          NIGHTLY_KEY_ALIAS: ${{ secrets.NIGHTLY_KEY_ALIAS }}
+          NIGHTLY_KEY_PASSWORD: ${{ secrets.NIGHTLY_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for name in NIGHTLY_KEYSTORE_BASE64 NIGHTLY_KEYSTORE_PASSWORD NIGHTLY_KEY_ALIAS NIGHTLY_KEY_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret: $name (see docs/FORK-NIGHTLY.md)"
+              exit 1
+            fi
+          done
+          printf '%s' "$NIGHTLY_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/nightly.jks"
+          chmod 600 "$RUNNER_TEMP/nightly.jks"
+
+      - uses: actions/setup-java@v4
+        if: steps.version.outputs.build == 'true'
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - uses: android-actions/setup-android@v3
+        if: steps.version.outputs.build == 'true'
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: steps.version.outputs.build == 'true'
+
+      - name: Build and check Android
+        if: steps.version.outputs.build == 'true'
+        env:
+          NIGHTLY_KEYSTORE_PATH: ${{ runner.temp }}/nightly.jks
+          NIGHTLY_KEYSTORE_PASSWORD: ${{ secrets.NIGHTLY_KEYSTORE_PASSWORD }}
+          NIGHTLY_KEY_ALIAS: ${{ secrets.NIGHTLY_KEY_ALIAS }}
+          NIGHTLY_KEY_PASSWORD: ${{ secrets.NIGHTLY_KEY_PASSWORD }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew :androidApp:assembleNightly :androidApp:testDebug testAndroidHostTest :androidApp:lintNightly -PnightlyVersionCode=${{ steps.version.outputs.code }}
+
+      - name: Verify APK and prepare assets
+        if: steps.version.outputs.build == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          APK=$(find androidApp/build/outputs/apk/nightly -name '*.apk' -print -quit)
+          test -n "$APK"
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose --print-certs "$APK"
+          cp "$APK" dist/music-assistant-nightly.apk
+          cp androidApp/build/outputs/mapping/nightly/mapping.txt dist/mapping.txt
+          (cd dist && sha256sum music-assistant-nightly.apk mapping.txt > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        if: steps.version.outputs.build == 'true'
+        with:
+          name: android-nightly-${{ github.sha }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish prerelease
+        if: steps.version.outputs.build == 'true'
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION_CODE: ${{ steps.version.outputs.code }}
+        run: |
+          set -euo pipefail
+          printf 'Fork nightly for commit %s.\n\nApplication ID: io.music_assistant.client.rpmlourenco.nightly\nVersion code: %s\nSigned with the persistent fork key.\n' "$GITHUB_SHA" "$VERSION_CODE" > "$RUNNER_TEMP/notes.md"
+          # Draft first: failed uploads can be repaired by a rerun.
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --target "$GITHUB_SHA" --draft --prerelease --title "Music Assistant Nightly $(date -u +%Y-%m-%d) ${GITHUB_SHA:0:7}" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          gh release upload "$TAG" dist/* --clobber
+          gh release edit "$TAG" --draft=false --prerelease --latest=false --notes-file "$RUNNER_TEMP/notes.md"
+          echo "Published [$TAG](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove private signing material
+        if: always()
+        run: rm -f "$RUNNER_TEMP/nightly.jks"

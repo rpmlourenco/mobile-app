@@ -14,6 +14,8 @@ captures
 *.apk
 *.ap_
 *.aab
+*.jks
+*.keystore
 
 # files for the dex VM
 *.dex
