@@ -86,6 +86,9 @@ Install JDK 21 and Android SDK, set `JAVA_HOME` and `ANDROID_HOME` (or
 `local.properties` for the SDK), then run:
 
 ```powershell
+$env:JAVA_HOME = 'C:\Program Files\Android\Android Studio\jbr'
+$env:ANDROID_HOME = "$env:LOCALAPPDATA\Android\Sdk"
+# Install SDK platform android-37 and build-tools 36.0.0 if missing.
 $env:NIGHTLY_KEYSTORE_PATH = "$env:USERPROFILE\music-assistant-nightly.jks"
 # Supply NIGHTLY_KEYSTORE_PASSWORD, NIGHTLY_KEY_ALIAS, NIGHTLY_KEY_PASSWORD
 # in this shell securely; do not commit them.
@@ -95,3 +98,13 @@ $nightlyCode = [int][Math]::Floor(([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() 
 
 The local nightly variant defaults to version code 1 if no property is supplied;
 use the timestamp formula for APKs intended to update CI installations.
+
+## Initial validation
+
+Actionlint passed for the nightly and modified Play release workflows. YAML and
+nightly XML parse checks passed. Gradle 9.7.1 with Android Studio's JDK 21
+successfully configured the project and listed the new nightly tasks. A full
+APK build/test run has not been completed: the local SDK only has platforms
+33/34 and build tools through 34.0.0, and signing secrets still need provisioning.
+GitHub Projects access requires an additional `project` token scope to attach
+the setup issue to the user's Music Assistant Mobile App project.
