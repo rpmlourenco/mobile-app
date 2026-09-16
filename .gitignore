@@ -79,3 +79,6 @@ androidApp/src/selfSignedRelease/assets/adi-registration.properties
 # Logs and other junk files
 tmp/
 .server
+
+# Private Android signing key and password recovery file
+/MusicAssistantSigning/
