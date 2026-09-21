@@ -233,7 +233,7 @@ class LibraryListViewModel(
 
         viewModelScope.launch {
             val searchQuery = currentState.searchQuery.takeIf { it.length >= 3 }
-            val orderBy = currentState.sortOption.toServerString()
+            val orderBy = currentState.sortOption.toServerString(mediaType)
 
             _state.update {
                 it.copy(isLoadingMore = true)
@@ -408,7 +408,7 @@ class LibraryListViewModel(
     private fun loadFirstPage() {
         viewModelScope.launch {
             val searchQuery = state.value.searchQuery.takeIf { it.length >= 0 }
-            val orderBy = state.value.sortOption.toServerString()
+            val orderBy = state.value.sortOption.toServerString(mediaType)
             updateState(DataState.Loading())
 
             val request = getRequest(

@@ -70,7 +70,7 @@ fun LyricsSheet(
     onDismiss: () -> Unit,
 ) {
     var offsetSec by remember(lyrics) { mutableStateOf(0f) }
-    var keepScreenOn by remember { mutableStateOf(false) }
+    var keepScreenOn by remember { mutableStateOf(true) }
     val isSynced = lyrics is Lyrics.Synced
 
     ModalBottomSheet(

@@ -24,7 +24,10 @@ data class SortOption(
     val field: SortField,
     val descending: Boolean = false,
 ) {
-    fun toServerString(): String = if (descending) "${field.serverKey}_desc" else field.serverKey
+    fun toServerString(mediaType: MediaType? = null): String {
+        val key = if (mediaType == MediaType.ARTIST && field == SortField.NAME) "name" else field.serverKey
+        return if (descending) "${key}_desc" else key
+    }
 }
 
 object SortConfig {
@@ -66,6 +69,7 @@ object SortConfig {
     }
 
     fun defaultFor(mediaType: MediaType): SortOption = when (mediaType) {
+        MediaType.ALBUM -> SortOption(SortField.YEAR, descending = true)
         MediaType.PODCAST -> SortOption(SortField.DATE_ADDED, descending = true)
         else -> SortOption(SortField.NAME)
     }

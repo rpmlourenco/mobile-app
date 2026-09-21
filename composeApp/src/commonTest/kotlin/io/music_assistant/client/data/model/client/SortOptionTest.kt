@@ -11,6 +11,20 @@ import kotlin.test.assertTrue
  */
 class SortOptionTest {
     @Test
+    fun `artist name sort uses the displayed name`() {
+        assertEquals("name", SortOption(SortField.NAME).toServerString(MediaType.ARTIST))
+        assertEquals("sort_name", SortOption(SortField.NAME).toServerString(MediaType.ALBUM))
+    }
+
+    @Test
+    fun `albums default to newest year first`() {
+        assertEquals(
+            SortOption(SortField.YEAR, descending = true),
+            SortConfig.defaultFor(MediaType.ALBUM),
+        )
+    }
+
+    @Test
     fun `default for album tracks is original ascending`() {
         assertEquals(SortOption(SortField.ORIGINAL), SortConfig.defaultFor(SubItemContext.ALBUM_TRACKS))
     }
