@@ -165,8 +165,6 @@ class ActionsViewModel(
         }
     }
 
-    fun getProviderIcon(provider: String) = dataSource.providerIcon(provider)
-
     fun onPlayClick(
         item: AppMediaItem,
         option: QueueOption,
