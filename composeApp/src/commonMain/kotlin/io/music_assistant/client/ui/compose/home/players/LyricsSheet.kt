@@ -85,7 +85,7 @@ fun LyricsSheet(
     onDismiss: () -> Unit,
 ) {
     var offsetMs by remember(lyrics) { mutableStateOf(0) }
-    var keepScreenOn by remember { mutableStateOf(false) }
+    var keepScreenOn by remember { mutableStateOf(true) }
     // The offset shifts lines against the live position, so it means nothing without both.
     val canAdjustOffset = lyrics is Lyrics.Synced && livePositionFlow != null
     // The sheet is its own window, so it hosts its own toasts above the page's ToastHost.
