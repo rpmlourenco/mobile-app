@@ -47,6 +47,7 @@ import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -58,14 +59,15 @@ import coil3.compose.AsyncImage
 import io.music_assistant.client.data.model.client.Player
 import io.music_assistant.client.data.model.client.PlayerData
 import io.music_assistant.client.data.model.client.PlayerDataFixtures
+import io.music_assistant.client.data.model.client.QualityTier
 import io.music_assistant.client.data.model.client.ResolvedChapter
 import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.Audiobook
 import io.music_assistant.client.data.model.client.items.PodcastEpisode
-import io.music_assistant.client.data.model.client.items.QualityTier
+import io.music_assistant.client.data.model.client.items.Track
 import io.music_assistant.client.data.model.client.items.canBeFavorited
-import io.music_assistant.client.data.model.client.items.qualityTier
 import io.music_assistant.client.data.model.client.presentationChapter
+import io.music_assistant.client.data.model.client.qualityTier
 import io.music_assistant.client.data.model.client.toAbsoluteSeekSeconds
 import io.music_assistant.client.imageloader.rememberArtworkRequest
 import io.music_assistant.client.ui.alphaOn
@@ -74,6 +76,7 @@ import io.music_assistant.client.ui.compose.common.PlayerColors
 import io.music_assistant.client.ui.compose.common.action.PlayerAction
 import io.music_assistant.client.ui.compose.common.icons.AlbumIcon
 import io.music_assistant.client.ui.compose.common.icons.TrackIcon
+import io.music_assistant.client.ui.compose.common.items.artistNavigation
 import io.music_assistant.client.ui.compose.common.painters.rememberPlaceholderPainter
 import io.music_assistant.client.ui.fadingEdges
 import io.music_assistant.client.ui.inactive
@@ -82,6 +85,7 @@ import io.music_assistant.client.utils.formatDuration
 import io.music_assistant.sendspin.api.PlayerState
 import kotlinx.coroutines.flow.Flow
 import musicassistantclient.composeapp.generated.resources.Res
+import musicassistantclient.composeapp.generated.resources.action_go_to_artist
 import musicassistantclient.composeapp.generated.resources.cd_favorite
 import musicassistantclient.composeapp.generated.resources.cd_lyrics
 import musicassistantclient.composeapp.generated.resources.cd_playing
@@ -146,6 +150,7 @@ fun CompactPlayerItem(
                     AsyncImage(
                         placeholder = placeholder,
                         fallback = placeholder,
+                        error = placeholder,
                         model = rememberArtworkRequest(currentMedia.imageUrl),
                         contentDescription = currentMedia.title,
                         contentScale = ContentScale.Crop,
@@ -282,6 +287,9 @@ fun FullPlayerItem(
     colors: PlayerColors,
     playerAction: (PlayerData, PlayerAction) -> Unit,
     onFavoriteClick: (AppMediaItem) -> Unit,
+    onFavoriteStreamClick: (PlayerData) -> Unit = {},
+    // See MainDataSource.canFavoriteCurrentlyPlaying: on-air song AND server support.
+    canFavoriteStream: Boolean = false,
     livePositionFlow: Flow<Double>?,
     bufferedAheadSecFlow: Flow<Double>? = null,
     lyricsAvailable: Boolean = false,
@@ -292,6 +300,9 @@ fun FullPlayerItem(
     onPlaybackSpeedClick: () -> Unit = {},
     // Server preference gate for the chapter-relative timeline.
     chapterProgressEnabled: Boolean = true,
+    navigateToItem: (AppMediaItem) -> Unit = {},
+    // The chooser for a multi-artist track lives in the dialog host, outside the pager.
+    onChooseArtist: () -> Unit = {},
 ) {
     val currentMedia = item.player.currentMedia
     val onPrimaryContainer = MaterialTheme.colorScheme.onPrimaryContainer
@@ -322,6 +333,7 @@ fun FullPlayerItem(
                 AsyncImage(
                     placeholder = placeholder,
                     fallback = placeholder,
+                    error = placeholder,
                     model = rememberArtworkRequest(it),
                     contentDescription = currentMedia.title,
                     contentScale = ContentScale.Crop,
@@ -364,10 +376,29 @@ fun FullPlayerItem(
         val timelinePosition =
             currentChapter?.relativeSec(displayPosition.toDouble())?.toFloat() ?: displayPosition
 
+        // The artist line does the overflow's "Go to artist"; a chapter name in that line has no artist.
+        // Remembered: the position tick recomposes this item several times a second.
+        val artists = (item.queueInfo?.currentItem?.track as? Track)
+            ?.takeIf { !poweredOff && currentChapter == null }
+            ?.artists.orEmpty()
+        val onSubtitleClick = remember(artists, navigateToItem, onChooseArtist) {
+            artistNavigation(artists, navigateToItem) { onChooseArtist() }
+        }
+        val goToArtistLabel = stringResource(Res.string.action_go_to_artist)
+
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .clearAndSetSemantics { contentDescription = trackContentDescription },
+                .clearAndSetSemantics {
+                    contentDescription = trackContentDescription
+                    // The cleared subtree hides the line's own click, so expose it here.
+                    onSubtitleClick?.let {
+                        onClick(goToArtistLabel) {
+                        it()
+                    true
+                    }
+                    }
+                },
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Text(
@@ -407,6 +438,7 @@ fun FullPlayerItem(
                     val subtitle = currentChapter?.displayName ?: currentMedia?.subtitle
                     Text(
                         modifier = Modifier.fillMaxWidth()
+                            .then(onSubtitleClick?.let { Modifier.clickable(onClick = it) } ?: Modifier)
                             .then(
                                 if (subtitle.isNullOrBlank()) {
                                     Modifier
@@ -684,7 +716,21 @@ fun FullPlayerItem(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (currentTrack?.canBeFavorited == true) {
+            if (canFavoriteStream) {
+                // Radio favourite adds the on-air song to the library; the queue's `favorite`
+                // flag is the station's, not the song's, so there is no "already favourited"
+                // state and the heart always renders un-filled.
+                IconButton(
+                    modifier = Modifier.size(favoriteSlot),
+                    onClick = { onFavoriteStreamClick(item) },
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.FavoriteBorder,
+                        contentDescription = stringResource(Res.string.cd_favorite),
+                        tint = colors.controlTint,
+                    )
+                }
+            } else if (currentTrack?.canBeFavorited == true) {
                 val isFavorite = currentTrack.favorite == true
                 IconButton(
                     modifier = Modifier.size(favoriteSlot),

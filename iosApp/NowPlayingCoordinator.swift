@@ -3,6 +3,53 @@ import MediaPlayer
 import AVFoundation
 import ComposeApp
 
+/// App-only loader shared by Now Playing and CarPlay. Kotlin resolves the fresh
+/// repository token first; only then can this loader probe the versioned decoded cache.
+/// A cache hit completes without downloading bytes or decoding NSData.
+struct NativeArtworkLoader {
+    @discardableResult
+    static func loadArtwork(
+        urlString: String,
+        completion: @escaping (UIImage?) -> Void
+    ) -> ComposeApp.Cancellable {
+        var cachedImage: UIImage?
+        return KmpHelper.shared.loadArtwork(
+            urlString: urlString,
+            cachedVersion: { token in
+                guard let image = NativeArtworkImageCache.shared.image(for: token.cacheKey) else {
+                    return false
+                }
+                cachedImage = image
+                return true
+            },
+            completion: { result in
+                if let cachedImage {
+                    completion(cachedImage)
+                    return
+                }
+                guard let result else {
+                    completion(nil)
+                    return
+                }
+                let payload = NativeArtworkPayload(
+                    data: result.data as Data,
+                    mimeType: result.mimeType,
+                    token: result.token
+                )
+                let image = NativeArtworkDecoder.decode(
+                    payload,
+                    decode: { UIImage(data: $0) },
+                    invalidate: { KmpHelper.shared.invalidateArtwork(token: $0) }
+                )
+                if let image, result.reusable {
+                    NativeArtworkImageCache.shared.insert(image, for: result.token.cacheKey)
+                }
+                completion(image)
+            }
+        )
+    }
+}
+
 /// Owns every write to Apple's system-media surfaces (Control Center, lock
 /// screen, CarPlay's now-playing state) by subscribing to the three Kotlin
 /// now-playing channels: track metadata, transport anchors, and queue modes.
@@ -73,11 +120,7 @@ final class NowPlayingCoordinator {
     /// The previous track's metadata stays on screen until the art is ready.
     private var artworkWaitTrackId: String?
 
-    /// One-entry artwork cache keyed by URL, so a same-art track change
-    /// (album playback) presents instantly without a refetch.
-    private var cachedArtworkUrl: String?
-    private var cachedArtwork: MPMediaItemArtwork?
-    private var currentArtworkLoad: Cancellable?
+    private var currentArtworkLoad: ComposeApp.Cancellable?
 
     /// Identifies the newest artwork request. Cancellation can't stop an
     /// already-dispatched completion, and the same track can issue several
@@ -113,6 +156,22 @@ final class NowPlayingCoordinator {
     private var currentLongFormSeekForwardSeconds: Int64?
     private var currentAudioSessionMode: AVAudioSession.Mode?
     private var currentAudioSessionOptions: AVAudioSession.CategoryOptions?
+
+    /// True from the first `activatePlayback()` until the presentation clears.
+    /// Written on the audio thread, read on main, hence the lock.
+    private let ownsSessionLock = NSLock()
+    private var ownsSession = false
+    var ownsActiveSession: Bool {
+        ownsSessionLock.lock()
+        defer { ownsSessionLock.unlock() }
+        return ownsSession
+    }
+
+    private func setOwnsActiveSession(_ value: Bool) {
+        ownsSessionLock.lock()
+        ownsSession = value
+        ownsSessionLock.unlock()
+    }
 
     // MARK: - Logging
 
@@ -173,18 +232,7 @@ final class NowPlayingCoordinator {
         guard let urlString = track.artworkUrl, !urlString.isEmpty else {
             supersedeArtworkLoad()
             artworkWaitTrackId = nil
-            cachedArtworkUrl = nil
-            cachedArtwork = nil
             applyTrackKeys(track, artwork: nil, rebuildingGroup: true)
-            return
-        }
-
-        // Cache hit (album playback reusing one cover): present immediately.
-        // Complete state, so rebuild (see the no-artwork branch).
-        if urlString == cachedArtworkUrl {
-            supersedeArtworkLoad()
-            artworkWaitTrackId = nil
-            applyTrackKeys(track, artwork: cachedArtwork, rebuildingGroup: true)
             return
         }
 
@@ -211,13 +259,6 @@ final class NowPlayingCoordinator {
             guard self.artworkRequestToken == token else {
                 self.logDebug("Ignoring superseded artwork for \(track.mediaItemId)")
                 return
-            }
-            // Cache only successes. A nil result may be a transient fetch
-            // failure; caching it would suppress retries for this URL for
-            // the rest of the session (e.g. a whole album with shared art).
-            if artwork != nil {
-                self.cachedArtworkUrl = urlString
-                self.cachedArtwork = artwork
             }
             self.artworkWaitTrackId = nil
             // Final write for this track: full state, so rebuild — clears any
@@ -269,10 +310,9 @@ final class NowPlayingCoordinator {
         currentTrackId = nil
         artworkWaitTrackId = nil
         supersedeArtworkLoad()
-        cachedArtworkUrl = nil
-        cachedArtwork = nil
         lastTransport = nil
         infoStore.clear()
+        setOwnsActiveSession(false)
         configureAudioSession(mode: .default)
         updateRemoteCommandMode(isLongFormContent: false)
     }
@@ -362,11 +402,11 @@ final class NowPlayingCoordinator {
     /// apps, so doing it at launch claims audio from whatever is already playing.
     /// Deferred to `activatePlayback()`, driven by real playback.
     ///
-    /// Music is mixable so voice prompts (Strava cues) duck instead of
-    /// interrupting it; spoken audio stays non-mixing so prompts pause it
-    /// and playback resumes at the same position.
+    /// Keep music non-mixable: `.mixWithOthers` prevents this app from becoming
+    /// the Now Playing app. Other apps request prompt ducking with `.duckOthers`,
+    /// so this session needs no ducking option.
     private func configureAudioSession(mode: AVAudioSession.Mode = .default) {
-        let options: AVAudioSession.CategoryOptions = mode == .spokenAudio ? [] : [.mixWithOthers]
+        let options: AVAudioSession.CategoryOptions = []
         guard currentAudioSessionMode != mode || currentAudioSessionOptions != options else { return }
         do {
             let session = AVAudioSession.sharedInstance()
@@ -387,10 +427,10 @@ final class NowPlayingCoordinator {
             // switched the session to .mixWithOthers while a remote player was
             // in view. Restore the mode/options the track handler chose.
             let mode = currentAudioSessionMode ?? .default
-            let options = currentAudioSessionOptions
-                ?? (mode == .spokenAudio ? [] : [.mixWithOthers])
+            let options: AVAudioSession.CategoryOptions = []
             try session.setCategory(.playback, mode: mode, options: options)
             try session.setActive(true, options: .notifyOthersOnDeactivation)
+            setOwnsActiveSession(true)
             // Info level: fires only when playback (re)starts, and an absent
             // line here is the tell when iOS shows "Not Playing" despite
             // healthy info-center assignments.
@@ -525,9 +565,9 @@ final class NowPlayingCoordinator {
 
     // MARK: - Artwork loading
 
-    private func loadArtwork(urlString: String, completion: @escaping (MPMediaItemArtwork?) -> Void) -> Cancellable {
-        return KmpHelper.shared.loadArtworkBytes(urlString: urlString) { data in
-            guard let data = data as Data?, let image = UIImage(data: data) else {
+    private func loadArtwork(urlString: String, completion: @escaping (MPMediaItemArtwork?) -> Void) -> ComposeApp.Cancellable {
+        return NativeArtworkLoader.loadArtwork(urlString: urlString) { image in
+            guard let image else {
                 completion(nil)
                 return
             }

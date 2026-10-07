@@ -14,8 +14,8 @@ android {
         applicationId = "io.music_assistant.client"
         minSdk = libs.versions.android.minSdk.get().toInt()
         targetSdk = libs.versions.android.targetSdk.get().toInt()
-        versionCode = 15
-        versionName = "0.14.0"
+        versionCode = 16
+        versionName = "0.15.0"
     }
     packaging {
         resources {
@@ -23,12 +23,6 @@ android {
         }
     }
     signingConfigs {
-        create("nightly") {
-            storeFile = System.getenv("NIGHTLY_KEYSTORE_PATH")?.let { file(it) }
-            storePassword = System.getenv("NIGHTLY_KEYSTORE_PASSWORD")
-            keyAlias = System.getenv("NIGHTLY_KEY_ALIAS")
-            keyPassword = System.getenv("NIGHTLY_KEY_PASSWORD")
-        }
         create("selfSigned") {
             storeFile = file(System.getProperty("user.home") + "/.android/debug.keystore")
             storePassword = "android"
@@ -57,14 +51,6 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-        }
-
-        create("nightly") {
-            initWith(getByName("release"))
-            applicationIdSuffix = ".rpmlourenco.nightly"
-            versionNameSuffix = "-nightly"
-            signingConfig = signingConfigs.getByName("nightly")
-            matchingFallbacks += listOf("release")
         }
 
         create("selfSignedRelease") {
@@ -135,8 +121,10 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlin.test)
     testImplementation(libs.androidx.compose.ui.test.junit4)
+    testImplementation(libs.coil.compose)
     testImplementation(libs.robolectric)
     testImplementation(libs.ktor.client.json)
+    testImplementation(libs.ktor.client.mock)
     testImplementation(libs.koin.test)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.compose.components.resources)
@@ -190,12 +178,6 @@ val generateLocalesConfig = tasks.register<GenerateLocalesConfig>("generateLocal
 
 androidComponents {
     onVariants { variant ->
-        if (variant.buildType == "nightly") {
-            val code = providers.gradleProperty("nightlyVersionCode")
-                .map { it.toInt() }
-                .orElse(1)
-            variant.outputs.forEach { it.versionCode.set(code) }
-        }
         variant.sources.res?.addGeneratedSourceDirectory(
             generateLocalesConfig,
             GenerateLocalesConfig::outputDir

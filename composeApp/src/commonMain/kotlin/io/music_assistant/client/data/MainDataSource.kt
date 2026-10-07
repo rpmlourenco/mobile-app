@@ -5,8 +5,10 @@ package io.music_assistant.client.data
 
 import co.touchlab.kermit.Logger
 import io.music_assistant.client.api.APICommands
+import io.music_assistant.client.api.Answer
 import io.music_assistant.client.api.Request
 import io.music_assistant.client.api.ServiceClient
+import io.music_assistant.client.api.fetchAllPages
 import io.music_assistant.client.data.MainDataSource.Companion.resolveSelectedPlayerId
 import io.music_assistant.client.data.factory.MediaItemFactory
 import io.music_assistant.client.data.factory.PlayerFactory
@@ -16,6 +18,7 @@ import io.music_assistant.client.data.model.client.Player
 import io.music_assistant.client.data.model.client.PlayerData
 import io.music_assistant.client.data.model.client.Queue
 import io.music_assistant.client.data.model.client.QueueInfo
+import io.music_assistant.client.data.model.client.byId
 import io.music_assistant.client.data.model.client.isBefore
 import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.LongFormSeekDefaults
@@ -118,6 +121,7 @@ class MainDataSource(
     /** Combined inputs for a [MainDataSource] player-data rebuild. */
     private data class PlayerBuildInputs(
         val players: DataState<List<Player>>,
+        val sortedIds: List<String>?,
         val queues: List<QueueInfo>,
         val localData: PlayerData?,
         val favoriteOverrides: Map<String, Boolean>,
@@ -153,47 +157,6 @@ class MainDataSource(
      * [buildPlayerDataList] so queue updates can't clobber it.
      */
     private val _favoriteOverrides = MutableStateFlow<Map<String, Boolean>>(emptyMap())
-
-    private val _players =
-        combine(_serverPlayers, settings.playersSorting) { playersState, sortedIds ->
-            when (playersState) {
-                is DataState.Error,
-                is DataState.Loading,
-                is DataState.NoData,
-                    -> playersState
-
-                is DataState.Data -> {
-                    val players = playersState.data
-                    DataState.Data(
-                        sortedIds?.let {
-                            players.sortedBy { player ->
-                                sortedIds.indexOf(player.id).takeIf { it >= 0 }
-                                    ?: Int.MAX_VALUE
-                            }
-                        } ?: players.sortedBy { player -> player.name },
-                    )
-                }
-
-                is DataState.Stale -> {
-                    // Preserve stale state with sorted data
-                    val players = playersState.data
-                    DataState.Stale(
-                        data = sortedIds?.let {
-                            players.sortedBy { player ->
-                                sortedIds.indexOf(player.id).takeIf { it >= 0 }
-                                    ?: Int.MAX_VALUE
-                            }
-                        } ?: players.sortedBy { player -> player.name },
-                        disconnectedAt = playersState.disconnectedAt,
-                        reason = playersState.reason,
-                    )
-                }
-            }
-        }.stateIn(
-            scope = this,
-            started = SharingStarted.Eagerly,
-            initialValue = DataState.Loading(),
-        )
 
     private val _playersData = MutableStateFlow<DataState<List<PlayerData>>>(DataState.Loading())
     val playersData = _playersData.asStateFlow()
@@ -283,13 +246,19 @@ class MainDataSource(
             _userSelectedPlayerId,
         ) { playersDataState, user ->
             val visibleIds = (playersDataState as? DataState.Data)
-                ?.data?.map { it.playerId }
+                ?.data?.filter { it.player.isSelectable }?.map { it.playerId }
                 .orEmpty()
             resolveSelectedPlayerId(
                 visiblePlayerIds = visibleIds,
                 userChoice = user,
             )
         }.stateIn(this, SharingStarted.Eagerly, settings.lastSelectedPlayerId.value)
+
+    /**
+     * Public view of the effective selection. Consumers that pair it with a player list
+     * must resolve the index against that same list, not read [selectedPlayerIndex].
+     */
+    val selectedPlayerId: StateFlow<String?> = _selectedPlayerId
 
     val selectedPlayerIndex = combine(_playersData, _selectedPlayerId) { listState, selectedId ->
         selectedId?.let { id ->
@@ -299,9 +268,7 @@ class MainDataSource(
     }.stateIn(this, SharingStarted.Eagerly, null)
 
     val selectedPlayer: PlayerData?
-        get() = selectedPlayerIndex.value?.let { selectedIndex ->
-            (_playersData.value as? DataState.Data)?.data?.getOrNull(selectedIndex)
-        }
+        get() = _selectedPlayerId.value?.let { id -> (_playersData.value as? DataState.Data)?.data?.byId(id) }
 
     // --- Canonical media-session "now playing" source ---
     // Single source of truth for what the MediaSession / notification presents,
@@ -388,12 +355,13 @@ class MainDataSource(
 
         launch {
             combine(
-                _players,
+                _serverPlayers,
+                settings.playersSorting,
                 _queueInfos,
                 localPlayerController.localPlayerData,
                 _favoriteOverrides,
-            ) { players, queues, localData, favOverrides ->
-                PlayerBuildInputs(players, queues, localData, favOverrides)
+            ) { players, sortedIds, queues, localData, favOverrides ->
+                PlayerBuildInputs(players, sortedIds, queues, localData, favOverrides)
             }
                 .debounce(Timings.EVENT_DEBOUNCE) // Small debounce to batch rapid updates, but don't delay initial load
                 .collect { input ->
@@ -406,6 +374,7 @@ class MainDataSource(
                                 is DataState.Data -> DataState.Data(
                                     buildPlayerDataList(
                                         input.players.data,
+                                        input.sortedIds,
                                         input.queues,
                                         input.localData,
                                         input.favoriteOverrides,
@@ -740,13 +709,19 @@ class MainDataSource(
      * Local player uses repository state (single source of truth); others built from server data.
      */
     private fun buildPlayerDataList(
-        allPlayers: List<Player>,
+        serverPlayers: List<Player>,
+        sortedIds: List<String>?,
         queues: List<QueueInfo>,
         localData: PlayerData?,
         favoriteOverrides: Map<String, Boolean>,
         oldValues: DataState<List<PlayerData>>,
     ): List<PlayerData> {
         val localPlayerId = settings.sendspinEffectivePlayerId.value
+        // User's saved order (unknown players last, in server order); name order until one is saved.
+        val allPlayers = sortedIds?.let {
+            serverPlayers.sortedBy { player -> sortedIds.indexOf(player.id).takeIf { it >= 0 } ?: Int.MAX_VALUE }
+        } ?: serverPlayers.sortedBy { it.name }
+        val oldPlayers = (oldValues as? DataState.Data)?.data.orEmpty()
         val playerDataList = allPlayers
             .map { player ->
                 val isLocal = player.id == localPlayerId
@@ -764,7 +739,7 @@ class MainDataSource(
                         allPlayers.filter { it.isAvailable }
                             .mapNotNull { it.asChildBindFor(player) }
                     }
-                if (isLocal && localData != null) {
+                val fresh = if (isLocal && localData != null) {
                     // Repository is source of truth for the local player; surface the
                     // latest server-anchored `elapsedTime` from `_queueInfos` so the slider
                     // re-anchors on `QueueTimeUpdatedEvent` (which writes only to
@@ -773,7 +748,7 @@ class MainDataSource(
                     val trackedElapsed = queues.find {
                         it.id == player.queueId || it.id == localPlayerId
                     }?.elapsedTime
-                    val withPosition = trackedElapsed?.let {
+                    trackedElapsed?.let {
                         (localData.queue as? DataState.Data)?.let { qd ->
                             localData.copy(
                                 queue = DataState.Data(
@@ -783,12 +758,8 @@ class MainDataSource(
                             )
                         }
                     } ?: localData
-                    // Preserve loaded queue items from previous state
-                    (oldValues as? DataState.Data)?.data
-                        ?.firstOrNull { it.player.id == player.id }
-                        ?.updateFrom(withPosition) ?: withPosition
                 } else {
-                    val newData = PlayerData(
+                    PlayerData(
                         player = player,
                         queue = queues.find { it.id == player.queueId }
                             ?.let { queueInfo ->
@@ -800,19 +771,15 @@ class MainDataSource(
                         childrenBinds = groupChildren,
                         isLocal = isLocal,
                     )
-                    (oldValues as? DataState.Data)?.data
-                        ?.firstOrNull { it.player.id == player.id }
-                        ?.updateFrom(newData) ?: newData
                 }
+                // Preserve loaded queue items from previous state
+                oldPlayers.firstOrNull { it.player.id == player.id }?.updateFrom(fresh) ?: fresh
             }
 
-        // Inject synthetic local player if not in server list
-        val withLocal =
-            if (localData != null && playerDataList.none { it.playerId == localPlayerId }) {
-                listOf(localData) + playerDataList
-            } else {
-                playerDataList
-            }
+        // The local player is pinned first regardless of the saved order, whether the server
+        // lists it or it is still the synthetic stand-in (SelectPlayerDialog won't move it).
+        val (serverLocal, others) = playerDataList.partition { it.isLocal }
+        val withLocal = serverLocal.ifEmpty { listOfNotNull(localData) } + others
         // Fill any null now-playing artwork from the queue track, then re-apply favorite
         // overrides last so the stale queue payload can't win. The two patches are
         // independent (currentMedia vs queue.currentItem.track.favorite), so order is free.
@@ -882,6 +849,38 @@ class MainDataSource(
                 )
             }
             result.onFailure { setFavoriteOverride(item, item.favorite) }
+        }
+    }
+
+    /**
+     * True when [playerData] has a real on-air stream song the connected server can
+     * resolve to a favouritable item. Gates the stream-favourite heart on both the
+     * media session and the in-app player, and guards [favoriteCurrentlyPlaying].
+     */
+    fun canFavoriteCurrentlyPlaying(playerData: PlayerData): Boolean =
+        playerData.canFavoriteCurrentlyPlaying(
+            (apiClient.sessionState.value as? HasConnectionData)?.serverInfo?.schemaVersion,
+        )
+
+    /**
+     * Favourites the song currently on air on [playerData]'s radio stream. Unlike
+     * [toggleFavorite], this always adds: the queue payload's `favorite` flag belongs
+     * to the station, not the on-air song, so there is no truthful "already
+     * favourited" state to toggle from. No optimistic override — the server resolves
+     * the favourited item from the stream title, not from the queue item, so there is
+     * nothing local to flip ahead of the round trip. An unsupported server or an
+     * unresolvable title is an expected refusal; callers report the result to the user.
+     */
+    suspend fun favoriteCurrentlyPlaying(playerData: PlayerData): Result<Answer> {
+        if (!canFavoriteCurrentlyPlaying(playerData)) {
+            return Result.failure(IllegalStateException("No supported on-air song to favorite"))
+        }
+        return apiClient.sendRequest(
+            Request.Player.addCurrentlyPlayingToFavorites(playerData.player.id),
+        ).mapCatching { answer ->
+            // A received RPC error is still a successful transport response.
+            check(!answer.json.containsKey("error_code")) { "The server rejected the stream favorite" }
+            answer
         }
     }
 
@@ -1643,8 +1642,11 @@ class MainDataSource(
     ) {
         launch {
             (forcedQueueData ?: fullData.queueInfo)?.let { queueInfo ->
-                val queueTracks = apiClient.sendRequest(Request.Queue.items(queueInfo.id))
-                    .resultAs<List<ServerQueueItem>>()?.let { queueFactory.createTrackList(it) }
+                // Paged so a huge queue never exceeds the server's per-message cap. A queue edited
+                // between two pages can duplicate or skip an item until the next queue event.
+                val queueTracks = Request.Queue.items(queueInfo.id)
+                    .fetchAllPages { apiClient.sendRequest(it).resultAs<List<ServerQueueItem>>() }
+                    ?.let { queueFactory.createTrackList(it) }
 
                 // Forward to local player repository so external consumers (Android Auto, CarPlay) see items
                 if (fullData.isLocal && queueTracks != null) {

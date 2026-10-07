@@ -49,6 +49,7 @@ import io.music_assistant.client.ui.MAX_DIALOG_HEIGHT
 import io.music_assistant.client.ui.alphaOn
 import io.music_assistant.client.ui.compose.common.icons.NowPlayingIcon
 import musicassistantclient.composeapp.generated.resources.Res
+import musicassistantclient.composeapp.generated.resources.player_unavailable
 import musicassistantclient.composeapp.generated.resources.players_title
 import org.jetbrains.compose.resources.stringResource
 import sh.calvin.reorderable.ReorderableItem
@@ -106,6 +107,9 @@ private fun PlayerSelection(
     val listState = rememberLazyListState()
     val reorderableLazyListState =
         rememberReorderableLazyListState(listState) { from, to ->
+            // The local player is pinned first (see MainDataSource.buildPlayerDataList):
+            // nothing moves onto its slot, so nothing can land above it.
+            if (internalPlayers.getOrNull(to.index)?.isLocal == true) return@rememberReorderableLazyListState
             internalPlayers = internalPlayers.toMutableList().apply {
                 add(to.index, removeAt(from.index))
             }
@@ -150,7 +154,11 @@ private fun PlayerSelection(
                 Color.Transparent
             }
 
-            ReorderableItem(state = reorderableLazyListState, key = item.player.id) {
+            ReorderableItem(
+                state = reorderableLazyListState,
+                key = item.player.id,
+                enabled = !item.isLocal,
+            ) {
                 Row(
                     modifier = Modifier
                         .padding(horizontal = 16.dp)
@@ -160,6 +168,7 @@ private fun PlayerSelection(
                         .border(1.dp, borderColor, plateShape)
                         .selectable(
                             selected = selected,
+                            enabled = item.player.isSelectable,
                             onClick = {
                                 onDismissRequest()
                                 onSelectPlayer(item.player.id)
@@ -169,8 +178,9 @@ private fun PlayerSelection(
                         .padding(horizontal = 16.dp, vertical = 16.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    // A dormant player stays selectable: pinning the selection to the
-                    // speaker the user wants keeps it there when the speaker wakes up.
+                    // A dormant player the app can still act on stays selectable: pinning the
+                    // selection to it keeps it there when the speaker wakes up. One it cannot
+                    // act on is listed but disabled.
                     val dormant = item.player.isPoweredOff
                     PlayerIcon(
                         player = item.player,
@@ -206,21 +216,31 @@ private fun PlayerSelection(
                             },
                         )
                     }
-                    Icon(
-                        modifier = Modifier
-                            .padding(start = 8.dp)
-                            .draggableHandle(
-                                onDragStopped = {
-                                    dragEndIndex?.let {
-                                        onReorder(internalPlayers.map { p -> p.player.id })
-                                    }
-                                },
-                            )
-                            .size(16.dp),
-                        imageVector = TablerIcons.GripVertical,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.secondary,
-                    )
+                    if (!item.player.isSelectable) {
+                        Text(
+                            text = stringResource(Res.string.player_unavailable),
+                            modifier = Modifier.padding(start = 8.dp).alpha(0.6f),
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                        )
+                    }
+                    if (!item.isLocal) {
+                        Icon(
+                            modifier = Modifier
+                                .padding(start = 8.dp)
+                                .draggableHandle(
+                                    onDragStopped = {
+                                        dragEndIndex?.let {
+                                            onReorder(internalPlayers.map { p -> p.player.id })
+                                        }
+                                    },
+                                )
+                                .size(16.dp),
+                            imageVector = TablerIcons.GripVertical,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.secondary,
+                        )
+                    }
                 }
             }
         }

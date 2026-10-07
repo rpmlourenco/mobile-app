@@ -8,6 +8,9 @@
     <uses-feature android:name="android.hardware.camera"/>
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false"/>
     <uses-permission android:name="android.permission.CAMERA"/>
+    <!-- Hold-to-talk announcements. Not required, so devices without a microphone still install the app. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false"/>
 
     <application
         android:name=".MyApplication"
@@ -47,7 +50,7 @@
                     android:host="auth"
                     android:path="/callback" />
             </intent-filter>
-            <!-- In-app page deep links: musicassistant://app/home|library|search -->
+            <!-- In-app page deep links: musicassistant://app/home|library|search|players[?player=<id|name>] -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />

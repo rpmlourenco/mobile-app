@@ -62,6 +62,38 @@ actual class PlatformFeature {
 - **Repository**: Single source of truth, exposes StateFlows
 - **DataSource**: Network/local data access
 - **Models**: Server DTOs in `model/server/`, domain models in `model/client/`
+- **List payloads**: `library_items` and `player_queues/items` answer in one message and the
+  server caps a message at about 9 MB. Never send a huge `limit`. Page with `Request.fetchAllPages`
+  (`api/Paging.kt`) when a caller needs the whole list. `playlist_tracks` is streamed by the
+  server in 500-item `partial` batches that `RpcEngine` reassembles. `library_items` already
+  returns slim summary items by default.
+- **In-list filter**: `List.clientFiltered(query)` (`model/client/QueryFilter.kt`) filters loaded
+  items on the client. Derive the visible list as raw → filter → sort in one place.
+- **Announcements**: `AnnouncementRepository` (`data/announcement/`) runs both kinds in an app scope,
+  because the server answers only after playback. Text uses `players/cmd/play_announcement` with
+  `message`. Voice has no upload endpoint: raw s16le PCM streams live over `/live_announcement`
+  (WebSocket) or the `live_announcement` data channel (WebRTC). Closing the link ends the clip, so
+  never cancel a session early. The platform microphone is the `MicrophoneCapture` Koin binding.
+
+## HTTP Clients
+
+- Get every `HttpClient` from the Koin `HttpClientFactory`. Do not call `HttpClient(engine)` directly.
+- Android (`AndroidHttpClientFactory`): OkHttp with the KeyChain client certificate that the user selected
+  (`SettingsRepository.clientCertificateAlias`), for mTLS. Trust stays the platform default, so the network
+  security config applies. All clients share one connection pool. A certificate change evicts that pool.
+- iOS (`IosHttpClientFactory`): Darwin. `handleChallenge` answers a client-certificate challenge with the identity
+  in `KeychainClientIdentity`, only while `clientCertificateAlias` is set. The Darwin engine owns its session pool,
+  so `KtorServiceClient` makes a new client when the certificate changes.
+
+## Artwork Loading
+
+- **`ArtworkRepository`**: Single owner of artwork fetching, disk caching, freshness, and concurrent-request deduplication. Shared by all platforms.
+- **Compose and Android media**: Use the singleton Coil loader. Its artwork adapter resolves through the repository; Coil owns decoding and decoded-memory caching, not a second disk cache.
+- **CarPlay and iOS Now Playing**: Use `KmpHelper.loadArtwork` through the shared `NativeArtworkLoader` adapter. Kotlin owns one cancellable coroutine covering fresh-token lookup and body loading; it accepts a synchronous Swift cache probe after token resolution, so a versioned native decoded-image hit skips the body entirely. Swift owns the bounded shared `NSCache` (including decode and presentation); only reusable repository results are inserted under the token identity-plus-digest key.
+- **WebRTC**: Uses the same repository through the existing HTTP proxy. Cache identities include the server ID so synthetic URLs cannot collide across servers.
+- **Cache identity**: Decoded-image keys include the content version. Decode-failure eviction targets only that version, never a newer replacement.
+
+**Key rule**: Route new artwork consumers through the shared loader or bridge. Do not add independent downloads, disk caches, or URL-only caches that bypass repository freshness.
 
 ## Compose Guidelines
 
@@ -146,6 +178,10 @@ Android foreground services integrate with Sendspin through MainDataSource:
 - Uses `playerData.queue` for queue access (not deprecated `builtinPlayerQueue`)
 - When Sendspin is playing locally, it appears in Android Auto
 - Supports library browsing via `AutoLibrary`
+- Shows a Home tab that copies the app home page. The tab has one browsable item for each
+  recommendation row. `visibleHomeFolders` (`ui/compose/home/HomeRowsConfig.kt`) filters and
+  orders the rows. It uses the same rules and the same `homeRowsConfig` as the app. The Shortcuts
+  row is not in the tab. The user turns the tab on or off in Settings → Car → Tabs.
 - All actions go through `MainDataSource.playerAction()` and `queueAction()`
 - Publishes browse-row and queue-row artwork as opaque, read-only `content://` URIs through
   `AndroidAutoArtworkProvider`. A media host fetches icon URIs in its own process and its own UID,

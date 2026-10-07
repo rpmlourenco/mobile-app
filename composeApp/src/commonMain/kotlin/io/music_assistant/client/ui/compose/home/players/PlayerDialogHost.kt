@@ -5,12 +5,16 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import io.music_assistant.client.data.model.client.PlayerData
 import io.music_assistant.client.data.model.client.byId
+import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.Track
 import io.music_assistant.client.data.model.client.lyrics
 import io.music_assistant.client.ui.compose.common.action.PlayerAction
 import io.music_assistant.client.ui.compose.common.items.AddToPlaylistDialog
+import io.music_assistant.client.ui.compose.common.items.ChooseArtistDialog
 import io.music_assistant.client.ui.compose.common.items.PlaylistActions
 import io.music_assistant.client.ui.compose.home.HomeScreenViewModel
+import io.music_assistant.client.ui.compose.home.players.announcement.AnnouncementDialog
+import io.music_assistant.client.ui.compose.provider.ProviderViewModel
 
 /**
  * Renders the one open player dialog, outside the pager.
@@ -19,7 +23,8 @@ import io.music_assistant.client.ui.compose.home.HomeScreenViewModel
  * can never tear down an open dialog. The host resolves [request] against the newest
  * [players] on each composition: when the player or the track the request names is gone, it
  * clears the request instead of leaving a stale id behind that a returning player would
- * revive.
+ * revive. [players] are the pager's players and anchor every request; [allPlayers] feed the
+ * player list, which also shows the players the pager leaves out.
  *
  * [homeScreenViewModel] is passed whole rather than as one callback per action: this is a
  * feature composable for a single screen, and the narrow form needs eleven parameters.
@@ -28,11 +33,14 @@ import io.music_assistant.client.ui.compose.home.HomeScreenViewModel
 fun PlayerDialogHost(
     request: PlayerDialogRequest?,
     players: List<PlayerData>,
+    allPlayers: List<PlayerData>,
     homeScreenViewModel: HomeScreenViewModel,
     dspSettingsViewModel: DspSettingsViewModel,
+    providerViewModel: ProviderViewModel,
     playlistActions: PlaylistActions?,
     canLeaveGroup: Boolean,
     onMoveToPlayer: (String) -> Unit,
+    onNavigateToItem: (AppMediaItem) -> Unit,
     onDismiss: () -> Unit,
 ) {
     request ?: return
@@ -42,7 +50,7 @@ fun PlayerDialogHost(
     when (request) {
         is PlayerDialogRequest.Select -> SelectPlayerDialog(
             selectedPlayer = player,
-            players = players,
+            players = allPlayers,
             onDismissRequest = onDismiss,
             onMoveToPlayer = onMoveToPlayer,
             onReorder = { homeScreenViewModel.onPlayersSortChanged(it) },
@@ -86,10 +94,22 @@ fun PlayerDialogHost(
             )
         }
 
+        is PlayerDialogRequest.ChooseArtist -> (player.queueInfo?.currentItem?.track as? Track)?.let {
+            ChooseArtistDialog(
+                artists = it.artists,
+                onSelect = { artist ->
+                    onDismiss()
+                    onNavigateToItem(artist)
+                },
+                onDismiss = onDismiss,
+            )
+        }
+
         is PlayerDialogRequest.AudioChain -> player.queueInfo?.currentItem?.let { queueTrack ->
             AudioChainDialog(
                 queueTrack = queueTrack,
                 player = player,
+                providerDetails = providerViewModel::getProviderDetails,
                 onDismissRequest = onDismiss,
             )
         }
@@ -103,6 +123,11 @@ fun PlayerDialogHost(
                 onDismissRequest = onDismiss,
             )
         }
+
+        is PlayerDialogRequest.Announcement -> AnnouncementDialog(
+            player = player,
+            onDismissRequest = onDismiss,
+        )
 
         is PlayerDialogRequest.AddToPlaylist -> playlistActions?.let { actions ->
             AddToPlaylistDialog(

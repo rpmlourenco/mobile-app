@@ -42,17 +42,34 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlin.time.Duration.Companion.seconds
 
 val HomeScreenViewModel.PlayersState.Data.selectedPlayer: PlayerData?
     get() = selectedPlayerIndex?.let(playerData::getOrNull)
+
+// Resolved against the same list it indexes: an index taken from a separately scheduled
+// flow can belong to the previous list, and the pager would then land on (and persist)
+// whichever player shifted into that slot.
+internal fun List<PlayerData>.indexOfPlayer(id: String?): Int? =
+    id?.let { indexOfFirst { it.playerId == id }.takeIf { it >= 0 } }
+
+// Deep-link player lookup, as the web frontend does it: selectable players only, case-insensitive.
+// An id match wins over a name match because names are not unique.
+internal fun List<Player>.findByIdOrName(query: String): Player? =
+    filter { it.isSelectable }.let { candidates ->
+        candidates.find { it.id.equals(query, ignoreCase = true) }
+            ?: candidates.find { it.name.equals(query, ignoreCase = true) }
+    }
 
 @OptIn(FlowPreview::class)
 class HomeScreenViewModel(
@@ -63,6 +80,7 @@ class HomeScreenViewModel(
 ) : ViewModel() {
     private val jobs = mutableListOf<Job>()
     private var loadDataJob: Job? = null
+    private var deepLinkPlayerJob: Job? = null
 
     private val _links = MutableSharedFlow<String>()
     val links = _links.asSharedFlow()
@@ -150,7 +168,6 @@ class HomeScreenViewModel(
                                 }
                                 stopJobs()
                                 jobs.add(watchPlayersData())
-                                jobs.add(watchSelectedPlayerData())
                             }
 
                             is DataConnectionState.AwaitingAuth -> {
@@ -251,13 +268,6 @@ class HomeScreenViewModel(
             if (error is CancellationException) throw error
             Logger.e("Error fetching recommendations: $error")
             _state.update { it.copy(recommendations = DataState.Error()) }
-            return
-        }
-
-        if (!mediaItemRepository.supportsRecommendationRowItems()) {
-            setRecommendationRows(
-                folders.map { RecommendationRowState(it, DataState.Data(it.items.orEmpty())) },
-            )
             return
         }
 
@@ -363,30 +373,32 @@ class HomeScreenViewModel(
     private fun watchPlayersData(): Job = viewModelScope.launch {
         combine(
             dataSource.playersData,
+            dataSource.selectedPlayerId,
             dataSource.sendspinState,
-        ) { playerData, sendspinState ->
-            playerData to sendspinState
-        }.collect { (playerData, sendspinState) ->
+        ) { playerData, selectedId, sendspinState ->
+            Triple(playerData, selectedId, sendspinState)
+        }.collect { (playerData, selectedId, sendspinState) ->
             // Update when in Loading or Data state
             // This allows transitioning from Loading to Data and updating existing Data
             // Don't update terminal states (Disconnected, NoAuth, NoServer)
             val currentState = _playersState.value
             if (currentState is PlayersState.Loading || currentState is PlayersState.Data) {
+                // The pager shows only players the app can act on; the player list shows all.
+                fun dataOf(all: List<PlayerData>): PlayersState.Data {
+                    val pageable = all.filter { it.player.isSelectable }
+                    return PlayersState.Data(
+                        playerData = pageable,
+                        selectedPlayerIndex = pageable.indexOfPlayer(selectedId),
+                        localPlayerId = dataSource.localPlayer.value?.playerId,
+                        sendspinState = sendspinState,
+                        allPlayerData = all,
+                    )
+                }
                 _playersState.update {
                     when (playerData) {
-                        is DataState.Data -> PlayersState.Data(
-                            playerData.data,
-                            dataSource.selectedPlayerIndex.value,
-                            dataSource.localPlayer.value?.playerId,
-                            sendspinState,
-                        )
-
-                        is DataState.Stale -> PlayersState.Data(
-                            playerData.data,  // Show stale data as normal data
-                            dataSource.selectedPlayerIndex.value,
-                            dataSource.localPlayer.value?.playerId,
-                            sendspinState,
-                        )
+                        is DataState.Data -> dataOf(playerData.data)
+                        // Show stale data as normal data
+                        is DataState.Stale -> dataOf(playerData.data)
 
                         is DataState.Error -> PlayersState.Error
                         is DataState.Loading -> PlayersState.Loading
@@ -397,16 +409,23 @@ class HomeScreenViewModel(
         }
     }
 
-    private fun watchSelectedPlayerData(): Job = viewModelScope.launch {
-        dataSource.selectedPlayerIndex.filterNotNull().collect { index ->
-            val dataState = _playersState.value as? PlayersState.Data
-            dataState?.let { state ->
-                _playersState.update { state.copy(selectedPlayerIndex = index) }
-            }
+    fun selectPlayer(player: Player) = dataSource.selectPlayer(player)
+
+    /**
+     * Selects the player that a deep link names by id or name. Waits for the player list
+     * (cold launch) for a bounded time; no match in that time keeps the current selection.
+     */
+    fun selectPlayerByIdOrName(query: String) {
+        deepLinkPlayerJob?.cancel()
+        deepLinkPlayerJob = viewModelScope.launch {
+            withTimeoutOrNull(DEEP_LINK_PLAYER_TIMEOUT) {
+                dataSource.playersData
+                    .mapNotNull { state -> state.dataOrNull?.map { it.player }?.findByIdOrName(query) }
+                    .first()
+            }?.let(dataSource::selectPlayer)
+                ?: Logger.withTag("HomeScreenVM").w { "Deep link: no selectable player '$query'" }
         }
     }
-
-    fun selectPlayer(player: Player) = dataSource.selectPlayer(player)
     fun playerAction(playerId: String, action: PlayerAction) =
         dataSource.playerAction(playerId, action)
 
@@ -460,11 +479,14 @@ class HomeScreenViewModel(
             val selectedPlayerIndex: Int? = null,
             val localPlayerId: String? = null,
             val sendspinState: PlayerState? = null,
+            /** Every listed player, including those left out of [playerData]. */
+            val allPlayerData: List<PlayerData> = playerData,
         ) : PlayersState()
     }
 
     private companion object {
         private const val BUFFER_REAL_INTERVAL = 500L
+        private val DEEP_LINK_PLAYER_TIMEOUT = 10.seconds
     }
 }
 

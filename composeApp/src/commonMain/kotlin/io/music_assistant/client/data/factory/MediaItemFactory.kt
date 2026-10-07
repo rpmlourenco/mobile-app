@@ -106,6 +106,7 @@ class MediaItemFactory(
                 images = resolveImageInfo(image, metadata),
                 items = items?.let { createList(it) },
                 path = path,
+                isPlayable = isPlayable == true,
             )
 
             MediaType.PODCAST -> Podcast(
@@ -116,7 +117,8 @@ class MediaItemFactory(
                 metadata = createMetadata(metadata),
                 favorite = favorite,
                 sortName = sortName,
-                uri = uri,
+                // The server's feed parser puts the feed's website link in `uri`; build the MA uri instead.
+                uri = "$provider://${MediaType.PODCAST.serverValue}/$itemId",
                 images = resolveImageInfo(image, metadata),
             )
 
@@ -201,6 +203,7 @@ class MediaItemFactory(
 
             MediaType.FLOW_STREAM,
             MediaType.ANNOUNCEMENT,
+            MediaType.AUDIO_SOURCE,
             MediaType.UNKNOWN,
             null,
                 -> null

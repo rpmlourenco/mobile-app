@@ -174,6 +174,49 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
                 put("player_id", JsonPrimitive(playerId))
             },
         )
+
+        /**
+         * Resolves [playerId]'s current on-air stream title to a library item and
+         * favourites it. Add-only: the queue's `favorite` flag belongs to the station,
+         * not the song, so there is no matching "remove" call. Raises server-side when
+         * the player has no stream title or the title can't be resolved to an item.
+         */
+        fun addCurrentlyPlayingToFavorites(playerId: String) = Request(
+            command = APICommands.PLAYERS_ADD_CURRENTLY_PLAYING_TO_FAVORITES,
+            args = buildJsonObject {
+                put("player_id", JsonPrimitive(playerId))
+            },
+        )
+
+        /**
+         * Speaks [message] on [playerId] through the server's text-to-speech engine. A null
+         * [preAnnounce] or [volumeLevel] is left out, so the player's own settings apply.
+         */
+        fun playAnnouncement(
+            playerId: String,
+            message: String,
+            preAnnounce: Boolean?,
+            volumeLevel: Int?,
+        ) = Request(
+            command = APICommands.PLAYERS_CMD_PLAY_ANNOUNCEMENT,
+            args = buildJsonObject {
+                put("player_id", JsonPrimitive(playerId))
+                put("message", JsonPrimitive(message))
+                preAnnounce?.let { put("pre_announce", JsonPrimitive(it)) }
+                volumeLevel?.let { put("volume_level", JsonPrimitive(it)) }
+            },
+        )
+
+        fun ttsEngines() = Request(command = APICommands.PLAYERS_TTS_ENGINES)
+
+        /** The player's own "chime before an announcement" setting, which the dialog starts from. */
+        fun announcementChime(playerId: String) = Request(
+            command = APICommands.CONFIG_PLAYERS_GET_VALUE,
+            args = buildJsonObject {
+                put("player_id", JsonPrimitive(playerId))
+                put("key", JsonPrimitive("tts_pre_announce"))
+            },
+        )
     }
 
     data object Queue {
@@ -181,7 +224,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
 
         fun items(
             queueId: String,
-            limit: Int = Int.MAX_VALUE,
+            limit: Int = SERVER_PAGE_SIZE,
             offset: Int = 0,
         ) = Request(
             command = APICommands.PLAYER_QUEUES_ITEMS,
@@ -327,7 +370,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
         fun listLibrary(
             favorite: Boolean? = null,
             search: String? = null,
-            limit: Int = Int.MAX_VALUE,
+            limit: Int = SERVER_PAGE_SIZE,
             offset: Int = 0,
             orderBy: String? = null,
             providers: List<String>? = null,
@@ -395,7 +438,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
         fun listLibrary(
             favorite: Boolean? = null,
             search: String? = null,
-            limit: Int = Int.MAX_VALUE,
+            limit: Int = SERVER_PAGE_SIZE,
             offset: Int = 0,
             orderBy: String? = null,
             providers: List<String>? = null,
@@ -446,7 +489,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
         fun listLibrary(
             favorite: Boolean? = null,
             search: String? = null,
-            limit: Int = Int.MAX_VALUE,
+            limit: Int = SERVER_PAGE_SIZE,
             offset: Int = 0,
             orderBy: String? = null,
             providers: List<String>? = null,
@@ -473,7 +516,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
         fun listLibrary(
             favorite: Boolean? = null,
             search: String? = null,
-            limit: Int = Int.MAX_VALUE,
+            limit: Int = SERVER_PAGE_SIZE,
             offset: Int = 0,
             orderBy: String? = null,
             providers: List<String>? = null,
@@ -500,7 +543,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
         fun listLibrary(
             favorite: Boolean? = null,
             search: String? = null,
-            limit: Int = Int.MAX_VALUE,
+            limit: Int = SERVER_PAGE_SIZE,
             offset: Int = 0,
             orderBy: String? = null,
             providers: List<String>? = null,
@@ -545,7 +588,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
         fun listLibrary(
             favorite: Boolean? = null,
             search: String? = null,
-            limit: Int = Int.MAX_VALUE,
+            limit: Int = SERVER_PAGE_SIZE,
             offset: Int = 0,
             orderBy: String? = null,
             albumArtistsOnly: Boolean = false,
@@ -621,7 +664,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
         fun listLibrary(
             favorite: Boolean? = null,
             search: String? = null,
-            limit: Int = Int.MAX_VALUE,
+            limit: Int = SERVER_PAGE_SIZE,
             offset: Int = 0,
             orderBy: String? = null,
             albumTypes: List<String>? = null,
@@ -660,7 +703,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
         fun list(
             favorite: Boolean? = null,
             search: String? = null,
-            limit: Int = Int.MAX_VALUE,
+            limit: Int = SERVER_PAGE_SIZE,
             offset: Int = 0,
             orderBy: String? = null,
             providers: List<String>? = null,
