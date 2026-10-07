@@ -15,9 +15,10 @@ jobs:
   release:
     runs-on: ubuntu-22.04
     if: >-
-      github.event_name == 'workflow_dispatch' ||
+      github.repository == 'music-assistant/mobile-app' &&
+      (github.event_name == 'workflow_dispatch' ||
       (github.event.pull_request.merged == true &&
-       contains(github.event.pull_request.labels.*.name, 'android_playstore_release'))
+       contains(github.event.pull_request.labels.*.name, 'android_playstore_release')))
 
     steps:
       - name: Checkout main
