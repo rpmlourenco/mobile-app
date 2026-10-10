@@ -84,7 +84,7 @@ internal class Scheduler(
         if (state.flushGeneration != seenFlush) {
             seenFlush = state.flushGeneration
             handle?.let {
-                it.pause()
+                if (state.phase == StreamPhase.Ended && played) it.pauseWithFade() else it.pause()
                 it.flush()
                 if (state.phase == StreamPhase.Playing) it.resume()
             }

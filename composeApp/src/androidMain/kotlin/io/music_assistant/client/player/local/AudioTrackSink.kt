@@ -10,7 +10,9 @@ import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.AudioRouting
 import android.media.AudioTrack
+import android.media.VolumeShaper
 import android.os.Build
+import android.os.SystemClock
 import co.touchlab.kermit.Logger
 import io.music_assistant.sendspin.api.AudioSink
 import io.music_assistant.sendspin.api.MonotonicClock
@@ -101,6 +103,10 @@ class AudioTrackSink(
         /** The head position wraps at 32 bits. */
         private val frames = MonotonicFrameCounter()
         private var interrupted = false
+        private var pauseFaded = false
+        private val pauseFade = runCatching { track.createVolumeShaper(PAUSE_FADE_CONFIGURATION) }
+            .onFailure { logger.w(it) { "AudioTrack pause fade unavailable" } }
+            .getOrNull()
 
         /** Set on the first interruption; the audio thread may be inside a blocking write at that moment. */
         @Volatile
@@ -205,8 +211,32 @@ class AudioTrackSink(
             runCatching { track.pause() }
         }
 
+        override fun pauseWithFade() {
+            val fade = pauseFade
+            if (fade == null) {
+                pause()
+                return
+            }
+            pauseFaded = runCatching {
+                fade.apply(VolumeShaper.Operation.PLAY)
+                SystemClock.sleep(PAUSE_FADE_MILLIS)
+                track.pause()
+                true
+            }.getOrElse {
+                logger.w(it) { "AudioTrack pause fade failed" }
+                runCatching { track.pause() }
+                false
+            }
+        }
+
         override fun resume() {
-            runCatching { track.play() }
+            runCatching {
+                if (pauseFaded) {
+                    pauseFade?.apply(VolumeShaper.Operation.REVERSE)
+                    pauseFaded = false
+                }
+                track.play()
+            }
         }
 
         override fun flush() {
@@ -230,6 +260,7 @@ class AudioTrackSink(
                 track.flush()
                 track.stop()
             }
+            pauseFade?.close()
             track.release()
             audioManager.abandonAudioFocusRequest(focusRequest)
             logger.i { "AudioTrack closed (${format.sampleRate}Hz)" }
@@ -239,6 +270,12 @@ class AudioTrackSink(
     private companion object {
         const val BUFFER_MULTIPLIER = 4
         const val DUCK_GAIN = 0.2f
+        const val PAUSE_FADE_MILLIS = 8L
+        val PAUSE_FADE_CONFIGURATION: VolumeShaper.Configuration = VolumeShaper.Configuration.Builder()
+            .setDuration(PAUSE_FADE_MILLIS)
+            .setCurve(floatArrayOf(0f, 1f), floatArrayOf(1f, 0f))
+            .setInterpolatorType(VolumeShaper.Configuration.INTERPOLATOR_TYPE_LINEAR)
+            .build()
         val MEDIA_ATTRIBUTES: AudioAttributes = AudioAttributes.Builder()
             .setUsage(AudioAttributes.USAGE_MEDIA)
             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)

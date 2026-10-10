@@ -98,6 +98,7 @@ class AudioPipelineTest {
         runCurrent()
         assertEquals(AudioPhase.Idle, h.pipeline.status.value.phase)
         assertTrue(h.handle.paused)
+        assertEquals(1, h.handle.fadedPauses)
         assertEquals(1, h.handle.flushes)
         assertFalse(h.handle.closed, "the sink stays warm after stream/end")
     }
@@ -355,6 +356,7 @@ class AudioPipelineTest {
         assertEquals(1, h.decoders.created.size)
         assertEquals(1, h.decoders.created.single().resets, "the codec drops the discarded timeline")
         assertEquals(1, h.handle.flushes)
+        assertEquals(0, h.handle.fadedPauses, "track restart must not fade the continuous output")
         assertTrue(h.pipeline.buffer.isEmpty)
         h.feed(0) // the de-dup memory is reset with the timeline
         runCurrent()

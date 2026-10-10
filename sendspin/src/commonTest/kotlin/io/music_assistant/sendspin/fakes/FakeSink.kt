@@ -32,6 +32,7 @@ class FakeSink(private val nowMicros: () -> Long) : AudioSink {
         /** Local time of each entry in [writes]. */
         val writeTimes = mutableListOf<Long>()
         var paused = false
+        var fadedPauses = 0
         var flushes = 0
         var closed = false
         var dead = false
@@ -72,6 +73,11 @@ class FakeSink(private val nowMicros: () -> Long) : AudioSink {
 
         override fun pause() {
             paused = true
+        }
+
+        override fun pauseWithFade() {
+            fadedPauses++
+            pause()
         }
 
         override fun resume() {

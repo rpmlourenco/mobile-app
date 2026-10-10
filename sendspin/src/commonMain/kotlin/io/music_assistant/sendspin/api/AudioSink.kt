@@ -34,6 +34,9 @@ interface SinkHandle : AutoCloseable {
 
     fun pause()
 
+    /** Stop audible output without a hard waveform cut when the platform supports it. */
+    fun pauseWithFade() = pause()
+
     fun resume()
 
     /** Drops audio queued inside the sink. */
