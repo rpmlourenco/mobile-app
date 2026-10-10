@@ -7,8 +7,8 @@ import kotlinx.coroutines.channels.ReceiveChannel
  * `null` disables the player and is the only "stop".
  *
  * A change to [endpoint], [deviceName], or [codecPreference] restarts the
- * connection. The audio pipeline is untouched. [userDelayMs] and
- * [bufferCapacityBytes] apply live.
+ * connection. The audio pipeline is untouched. [userDelayMs],
+ * [bufferCapacityBytes], and [softDriftCorrectionEnabled] apply live.
  */
 data class LocalPlayerConfig(
     val endpoint: Endpoint,
@@ -19,6 +19,12 @@ data class LocalPlayerConfig(
     val bufferCapacityBytes: Int,
     /** Manual playback lag, added to every chunk's presentation time. */
     val userDelayMs: Int,
+    /**
+     * Gently resample PCM to follow the server clock between hard corrections.
+     * Disable for a standalone player where preserving samples matters more than
+     * staying aligned with another output.
+     */
+    val softDriftCorrectionEnabled: Boolean = true,
 )
 
 sealed interface Endpoint {

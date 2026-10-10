@@ -137,6 +137,7 @@ internal class SendspinPlayerImpl(
             clockSync,
             deps.clock,
             config.value?.bufferCapacityBytes ?: 0,
+            config.value?.softDriftCorrectionEnabled ?: true,
         )
         val connector = connectorFactory(deps.httpClient)
         val supervisor = ConnectionSupervisor(
@@ -153,6 +154,7 @@ internal class SendspinPlayerImpl(
             config.filterNotNull().collect {
                 pipeline.userDelayMicros = it.userDelayMs * 1_000L
                 pipeline.capacityBytes = it.bufferCapacityBytes
+                pipeline.softDriftCorrectionEnabled = it.softDriftCorrectionEnabled
             }
         }
         launch { session.publishState() }

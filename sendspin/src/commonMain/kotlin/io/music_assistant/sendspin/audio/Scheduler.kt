@@ -237,7 +237,12 @@ internal class Scheduler(
 
             abs(lead) > SOFT_TOLERANCE_MICROS -> {
                 val blockMicros = framesToMicros((pcm.size / fmt.bytesPerFrame).toLong(), fmt)
-                write(out, corrector?.correct(pcm, driftMicros = -lead, blockMicros = blockMicros) ?: pcm)
+                val corrected = if (pipeline.softDriftCorrectionEnabled) {
+                    corrector?.correct(pcm, driftMicros = -lead, blockMicros = blockMicros) ?: pcm
+                } else {
+                    pcm
+                }
+                write(out, corrected)
             }
 
             else -> write(out, pcm)

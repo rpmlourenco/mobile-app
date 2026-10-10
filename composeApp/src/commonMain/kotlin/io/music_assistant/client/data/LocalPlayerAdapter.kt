@@ -548,6 +548,9 @@ class LocalPlayerAdapter(
                 codecPreference = listOf(codec),
                 bufferCapacityBytes = bufferCapacityMb * SettingsRepository.BYTES_PER_MB,
                 userDelayMs = -staticDelayMs,
+                // The app's local output is deliberately detached before playback,
+                // so sample-perfect standalone audio wins over group clock tracking.
+                softDriftCorrectionEnabled = false,
             )
         }
 

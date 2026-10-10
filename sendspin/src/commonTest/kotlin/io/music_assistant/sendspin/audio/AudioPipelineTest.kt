@@ -178,6 +178,24 @@ class AudioPipelineTest {
     }
 
     @Test
+    fun standaloneQualityModeDoesNotResampleSmallDrift() = pipelineTest { h ->
+        h.pipeline.softDriftCorrectionEnabled = false
+        h.pipeline.apply(StreamAction.StartFresh(flac))
+        runCurrent()
+        h.pipeline.onAudio(h.chunk(dueMillis = 0, millis = 100))
+        runCurrent()
+        val plainSize = h.handle.writes.single().size
+
+        // 100 ms remains queued, so this block is 30 ms early: normally inside
+        // the soft-correction band and therefore resampled slightly longer.
+        h.pipeline.onAudio(h.chunk(dueMillis = 130, millis = 100))
+        runCurrent()
+
+        assertEquals(2, h.handle.writes.size)
+        assertEquals(plainSize, h.handle.writes[1].size)
+    }
+
+    @Test
     fun withoutPositionFeedbackTheLoopIsOpenWaitUntilDueAndWriteLate() = pipelineTest { h ->
         h.sink.reportPosition = false
         h.sink.latencyMicros = null

@@ -43,6 +43,7 @@ internal class AudioPipeline(
     clockSync: ClockSync,
     private val clock: MonotonicClock,
     capacityBytes: Int,
+    softDriftCorrectionEnabled: Boolean = true,
 ) {
     internal data class StreamState(
         val phase: StreamPhase,
@@ -70,6 +71,9 @@ internal class AudioPipeline(
 
     @Volatile
     var userDelayMicros: Long = 0L
+
+    @Volatile
+    var softDriftCorrectionEnabled: Boolean = softDriftCorrectionEnabled
 
     var capacityBytes: Int
         get() = buffer.capacityBytes
