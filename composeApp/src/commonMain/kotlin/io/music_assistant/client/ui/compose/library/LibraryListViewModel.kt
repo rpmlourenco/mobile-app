@@ -13,9 +13,14 @@ import io.music_assistant.client.data.model.client.SortConfig
 import io.music_assistant.client.data.model.client.SortOption
 import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.Genre
+import io.music_assistant.client.data.model.client.items.MediaCollection
+import io.music_assistant.client.data.model.client.items.isAiRadioShow
 import io.music_assistant.client.data.model.server.ServerProviderInstance
+import io.music_assistant.client.data.play.PlayDispatcher
+import io.music_assistant.client.data.play.PlayRequest
 import io.music_assistant.client.data.repository.MediaItemChange
 import io.music_assistant.client.data.repository.MediaItemRepository
+import io.music_assistant.client.settings.SeriesGrouping
 import io.music_assistant.client.settings.SettingsRepository
 import io.music_assistant.client.ui.Timings
 import io.music_assistant.client.ui.compose.common.DataState
@@ -40,6 +45,7 @@ class LibraryListViewModel(
     private val mainDataSource: MainDataSource,
     private val settingsRepository: SettingsRepository,
     private val mediaItemRepository: MediaItemRepository,
+    private val playDispatcher: PlayDispatcher,
 ) : ViewModel() {
     private val searchTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
 
@@ -50,6 +56,7 @@ class LibraryListViewModel(
             // This VM is recreated on every tab re-enter, so the persisted sort is
             // what makes the choice survive leaving the screen.
             sortOption = settingsRepository.getSortOption(mediaType),
+            seriesGrouping = settingsRepository.getSeriesGrouping(),
         ),
     )
     val state = _state.asStateFlow()
@@ -217,6 +224,13 @@ class LibraryListViewModel(
         _state.update { it.copy(searchQuery = query) }
     }
 
+    fun onSeriesGroupingToggled() {
+        val grouping = _state.value.seriesGrouping.toggled()
+        settingsRepository.setSeriesGrouping(grouping)
+        _state.update { it.copy(seriesGrouping = grouping) }
+        searchTrigger.tryEmit(Unit)
+    }
+
     fun onSortChanged(sortOption: SortOption) {
         settingsRepository.setSortOption(mediaType, sortOption)
         _state.update { it.copy(sortOption = sortOption) }
@@ -245,6 +259,7 @@ class LibraryListViewModel(
                 orderBy,
                 searchQuery,
                 currentState.filters,
+                currentState.seriesGrouping,
             )
             val result = mediaItemRepository.fetchMediaItems(request)
 
@@ -276,6 +291,7 @@ class LibraryListViewModel(
         orderBy: String,
         searchQuery: String?,
         filters: LibraryFilters,
+        seriesGrouping: SeriesGrouping,
     ): Request {
         val favorite = filters.favorite.takeIf { it }
         val providers = filters.providers.takeIf { it.isNotEmpty() }
@@ -331,6 +347,7 @@ class LibraryListViewModel(
                 favorite = favorite,
                 providers = providers,
                 genres = genres,
+                collapseCollections = seriesGrouping == SeriesGrouping.GROUPED,
             )
 
             MediaType.PODCAST -> Request.Podcast.listLibrary(
@@ -387,21 +404,19 @@ class LibraryListViewModel(
         option: QueueOption,
         radio: Boolean,
     ) {
-        viewModelScope.launch {
-            val queueId = mainDataSource.selectedPlayer?.queueOrPlayerId ?: return@launch
+        val queueId = mainDataSource.selectedPlayer?.queueOrPlayerId ?: return
 
-            item.mediaUri?.let { mediaUri ->
-                Logger.withTag("PlayDispatch")
-                    .i { "ItemListViewModel: uri=$mediaUri option=$option radio=$radio queue=$queueId" }
-                apiClient.sendRequest(
-                    Request.Library.play(
-                        media = listOf(mediaUri),
-                        queueOrPlayerId = queueId,
-                        option = option,
-                        endlessMixMode = radio && item !is Genre,
-                    ),
-                )
-            }
+        item.mediaUri?.let { mediaUri ->
+            Logger.withTag("PlayDispatch")
+                .i { "ItemListViewModel: uri=$mediaUri option=$option radio=$radio queue=$queueId" }
+            playDispatcher.play(
+                PlayRequest(
+                    queueOrPlayerId = queueId,
+                    media = listOf(mediaUri),
+                    option = option,
+                    endlessMixMode = radio && item !is Genre,
+                ),
+            )
         }
     }
 
@@ -420,11 +435,13 @@ class LibraryListViewModel(
                 orderBy,
                 searchQuery,
                 state.value.filters,
+                state.value.seriesGrouping,
             )
             val result = mediaItemRepository.fetchMediaItems(request)
 
             result.getOrNull()
-                ?.filter { it.mediaType == mediaType }
+                // A grouped audiobook listing mixes series rows in with the books.
+                ?.filter { it.mediaType == mediaType || it is MediaCollection }
                 ?.let { items ->
                     updateStateWithData(
                         items = items,
@@ -449,7 +466,10 @@ class LibraryListViewModel(
         offset: Int,
         hasMore: Boolean,
     ) {
-        val deduped = items.distinctBy { Triple(it.mediaType, it.provider, it.itemId) }
+        // Callers compute `hasMore` from the raw page, so hiding rows here keeps paging intact.
+        val deduped = items
+            .filterNot { it.isAiRadioShow }
+            .distinctBy { Triple(it.mediaType, it.provider, it.itemId) }
         _state.update {
             it.copy(
                 dataState = DataState.Data(deduped),
@@ -475,5 +495,7 @@ class LibraryListViewModel(
         val offset: Int = 0,
         // Per-type filter set; only the fields applicable to [mediaType] are surfaced.
         val filters: LibraryFilters = LibraryFilters.DEFAULT,
+        // Audiobooks only: GROUPED sends `collapse_collections`, so a series comes back as one row.
+        val seriesGrouping: SeriesGrouping = SeriesGrouping.FLAT,
     )
 }

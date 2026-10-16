@@ -84,6 +84,7 @@ class ItemPage(
             MediaType.PODCAST_EPISODE -> TODO()
             MediaType.GENRE -> TODO()
             MediaType.FOLDER -> TODO()
+            MediaType.COLLECTION -> TODO()
             MediaType.FLOW_STREAM -> TODO()
             MediaType.ANNOUNCEMENT -> TODO()
             MediaType.SOUND_EFFECT -> TODO()
@@ -113,6 +114,15 @@ class ItemPage(
             .onNodeWithContentDescription(Res.string.cd_provider_filter.get(row, current))
             .performClick()
         composeTestRule.onNode(hasAnyAncestor(isPopup()).and(hasText(new))).performClick()
+        return this
+    }
+
+    fun assertProviderNotOffered(row: String, current: String, provider: String): ItemPage {
+        composeTestRule
+            .onNodeWithContentDescription(Res.string.cd_provider_filter.get(row, current))
+            .performClick()
+        composeTestRule.onNode(hasAnyAncestor(isPopup()).and(hasText(current))).assertExists()
+        composeTestRule.onNode(hasAnyAncestor(isPopup()).and(hasText(provider))).assertDoesNotExist()
         return this
     }
 
