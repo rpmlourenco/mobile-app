@@ -73,10 +73,8 @@ class ActionsViewModel(
         }
     }
 
-    /**
-     * Sets exact or toggles favorite status of the item.
-     */
-    override fun onFavoriteClick(item: AppMediaItem) = dataSource.toggleFavorite(item)
+    override fun onFavoriteChange(item: AppMediaItem, favorite: Boolean?) =
+        dataSource.setFavorite(item, favorite)
 
     /** Favourites the on-air song for a radio stream. See [MainDataSource.favoriteCurrentlyPlaying]. */
     fun onFavoriteStreamClick(playerData: PlayerData) {
@@ -167,7 +165,7 @@ class ActionsViewModel(
                     // Server only writes the playlog and emits no update event, so
                     // optimistically patch lists; reverts on next refetch if wrong.
                     mediaItemRepository.publishLocalChange(
-                        MediaItemChange.Updated(markable.withPlayed(true)),
+                        MediaItemChange.Updated(markable.withPlayed(true), carriesFavorite = false),
                     )
                     _toasts.emit(getString(Res.string.toast_marked_played))
                 }
@@ -184,7 +182,7 @@ class ActionsViewModel(
             apiClient.sendRequest(Request.Library.markUnplayed(markable))
                 .onSuccess {
                     mediaItemRepository.publishLocalChange(
-                        MediaItemChange.Updated(markable.withPlayed(false)),
+                        MediaItemChange.Updated(markable.withPlayed(false), carriesFavorite = false),
                     )
                     _toasts.emit(getString(Res.string.toast_marked_unplayed))
                 }

@@ -3,36 +3,58 @@ package io.music_assistant.client.data.repository
 import co.touchlab.kermit.Logger
 import io.music_assistant.client.api.Request
 import io.music_assistant.client.api.ServiceClient
+import io.music_assistant.client.api.fetchAllPages
 import io.music_assistant.client.data.factory.MediaItemFactory
+import io.music_assistant.client.data.model.client.Lyrics
 import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.RecommendationFolder
+import io.music_assistant.client.data.model.client.items.Track
+import io.music_assistant.client.data.model.client.lyricsOf
 import io.music_assistant.client.data.model.server.SearchResult
 import io.music_assistant.client.data.model.server.ServerMediaItem
+import io.music_assistant.client.data.model.server.events.FavoriteUpdatedEvent
 import io.music_assistant.client.data.model.server.events.MediaItemAddedEvent
 import io.music_assistant.client.data.model.server.events.MediaItemDeletedEvent
 import io.music_assistant.client.data.model.server.events.MediaItemUpdatedEvent
+import io.music_assistant.client.data.model.server.events.ServerFavoriteUpdate
+import io.music_assistant.client.data.model.server.pagesPlaylistTracksAndEpisodes
+import io.music_assistant.client.data.model.server.sendsFavoriteUpdates
 import io.music_assistant.client.ui.compose.common.getOrEmptyList
+import io.music_assistant.client.utils.HasConnectionData
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.IO
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.time.Duration.Companion.seconds
 
 interface MediaItemRepository {
     suspend fun fetchMediaItems(request: Request): Result<List<AppMediaItem>>
+
+    /**
+     * Every item of a `playlist_tracks` or `podcast_episodes` [request]. Null when nothing could
+     * be loaded; a page failure after the first page gives the items loaded so far.
+     */
+    suspend fun fetchAllMediaItems(request: Request): List<AppMediaItem>?
     val itemChanges: SharedFlow<MediaItemChange>
     suspend fun search(request: Request): Result<SearchResultData>
     suspend fun fetchMediaItem(request: Request): Result<AppMediaItem?>
+
+    /** The lyrics the server finds for [track]; `Result.success(null)` when it has none. */
+    suspend fun fetchTrackLyrics(track: Track): Result<Lyrics?>
     fun publishLocalChange(change: MediaItemChange)
 }
 
@@ -47,6 +69,8 @@ interface MediaItemRepository {
 class ServiceClientMediaItemRepository(
     private val apiClient: ServiceClient,
     private val factory: MediaItemFactory,
+    // The answer resumes on the caller's dispatcher, usually Main; decode and map off it.
+    private val workDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : MediaItemRepository {
     // Singleton-scoped app-lifetime job; only used to keep [itemChanges]
     // hot. Survives subscriber turnover so quick navigation between screens
@@ -59,11 +83,27 @@ class ServiceClientMediaItemRepository(
      * failed [Result] so callers can still log via `result.exceptionOrNull()`.
      */
     override suspend fun fetchMediaItems(request: Request): Result<List<AppMediaItem>> =
-        apiClient.sendRequest(request).mapCatching { answer ->
-            answer.resultAs<List<ServerMediaItem>>()
-                ?.let(factory::createList)
-                ?: error("Missing or undecodable media list payload")
+        withContext(workDispatcher) {
+            apiClient.sendRequest(request).mapCatching { answer ->
+                answer.resultAs<List<ServerMediaItem>>()
+                    ?.let(factory::createList)
+                    ?: error("Missing or undecodable media list payload")
+            }
         }
+
+    /**
+     * A server from 2.11 answers one page, so the pages are walked. An older server streams the
+     * whole list on the plain request (see [pagesPlaylistTracksAndEpisodes]).
+     */
+    override suspend fun fetchAllMediaItems(request: Request): List<AppMediaItem>? =
+        if (pagesPlaylistTracksAndEpisodes(schemaVersion())) {
+            request.fetchAllPages { fetchMediaItems(it).getOrNull() }
+        } else {
+            fetchMediaItems(request).getOrNull()
+        }
+
+    private fun schemaVersion(): Int? =
+        (apiClient.sessionState.value as? HasConnectionData)?.serverInfo?.schemaVersion
 
     /**
      * Issue [request] and decode its payload as a single client media item.
@@ -71,16 +111,29 @@ class ServiceClientMediaItemRepository(
      * "not found" stays distinguishable from a transport failure.
      */
     override suspend fun fetchMediaItem(request: Request): Result<AppMediaItem?> =
-        apiClient.sendRequest(request).map { answer ->
-            answer.resultAs<ServerMediaItem>()?.let(factory::create)
+        withContext(workDispatcher) {
+            apiClient.sendRequest(request).map { answer ->
+                answer.resultAs<ServerMediaItem>()?.let(factory::create)
+            }
         }
 
     /** Issue [request] and decode its payload as a typed [SearchResultData]. */
     override suspend fun search(request: Request): Result<SearchResultData> =
-        apiClient.sendRequest(request).mapCatching { answer ->
-            answer.resultAs<SearchResult>()
-                ?.let(factory::createSearchResult)
-                ?: error("Missing or undecodable search payload")
+        withContext(workDispatcher) {
+            apiClient.sendRequest(request).mapCatching { answer ->
+                answer.resultAs<SearchResult>()
+                    ?.let(factory::createSearchResult)
+                    ?: error("Missing or undecodable search payload")
+            }
+        }
+
+    /** `metadata/get_track_lyrics` answers a `[lyrics, lrc_lyrics]` tuple. */
+    override suspend fun fetchTrackLyrics(track: Track): Result<Lyrics?> =
+        withContext(workDispatcher) {
+            apiClient.sendRequest(Request.Metadata.getTrackLyrics(track)).map { answer ->
+                answer.resultAs<List<String?>>()
+                    ?.let { lyricsOf(plain = it.getOrNull(0), lrc = it.getOrNull(1)) }
+            }
         }
 
     // Client-originated changes for mutations the server doesn't echo back as an
@@ -102,22 +155,43 @@ class ServiceClientMediaItemRepository(
      */
     override val itemChanges: SharedFlow<MediaItemChange> = merge(
         localChanges,
-        apiClient.events.mapNotNull { event ->
-            when (event) {
-                is MediaItemAddedEvent ->
-                    factory.create(event.data)?.let(MediaItemChange::Added)
+        apiClient.events
+            // The socket reader suspends on a full event buffer, and the favorite fetch below
+            // waits for that reader. Buffer here so the fetch never blocks the reader.
+            .buffer(Channel.UNLIMITED)
+            .mapNotNull { event ->
+                val carriesFavorite = !sendsFavoriteUpdates(schemaVersion())
+                when (event) {
+                    is MediaItemAddedEvent ->
+                        factory.create(event.data)
+                            ?.let { MediaItemChange.Added(it, carriesFavorite) }
 
-                is MediaItemUpdatedEvent ->
-                    factory.create(event.data)?.let(MediaItemChange::Updated)
+                    is MediaItemUpdatedEvent ->
+                        factory.create(event.data)
+                            ?.let { MediaItemChange.Updated(it, carriesFavorite) }
 
-                is MediaItemDeletedEvent ->
-                    factory.create(event.data.withLibraryStripped())
-                        ?.let(MediaItemChange::Deleted)
+                    is MediaItemDeletedEvent ->
+                        factory.create(event.data.withLibraryStripped())
+                            ?.let(MediaItemChange::Deleted)
 
-                else -> null
-            }
-        },
+                    is FavoriteUpdatedEvent -> favoriteUpdated(event.data)
+
+                    else -> null
+                }
+            },
     ).shareIn(scope, SharingStarted.WhileSubscribed(replayExpirationMillis = 0), replay = 0)
+
+    // The event has no item body, so fetch the item to match rows by provider mappings. The
+    // state of the event wins: events come in order, and a fetch can answer after a newer change.
+    // The fetch holds every later change, so it has a time limit.
+    private suspend fun favoriteUpdated(update: ServerFavoriteUpdate): MediaItemChange? =
+        withTimeoutOrNull(FAVORITE_FETCH_TIMEOUT) {
+            fetchMediaItem(Request.Library.itemByUri(update.uri)).getOrNull()
+        }?.let { MediaItemChange.FavoriteUpdated(it.withFavorite(update.favorite)) }
+            ?: run {
+                Logger.withTag("MediaItemRepository").w { "No item for favorite update of ${update.uri}" }
+                null
+            }
 
     // When the server announces the deletion of a library record, the
     // *underlying* provider item still exists. Re-key the DTO to its first
@@ -133,31 +207,31 @@ class ServiceClientMediaItemRepository(
             uri = "${fallback.providerInstance}://$mediaType/${fallback.itemId}",
         )
     }
+
+    private companion object {
+        val FAVORITE_FETCH_TIMEOUT = 10.seconds
+    }
 }
 
 /**
  * The home-page recommendation rows as the server returned them
  */
 suspend fun MediaItemRepository.fetchRecommendationRows(): Result<List<RecommendationFolder>> =
-    withContext(Dispatchers.IO) {
-        fetchMediaItems(Request.Library.recommendations())
-            .map { items -> items.filterIsInstance<RecommendationFolder>() }
-    }
+    fetchMediaItems(Request.Library.recommendations())
+        .map { items -> items.filterIsInstance<RecommendationFolder>() }
 
 /** Items of one recommendation row, or null when the fetch failed (logged). */
 suspend fun MediaItemRepository.fetchRecommendationRowItems(
     folder: RecommendationFolder,
-): List<AppMediaItem>? = withContext(Dispatchers.IO) {
-    fetchMediaItems(
-        Request.Library.recommendationItems(folder.provider, folder.itemId),
-    ).getOrElse { error ->
-        if (error is CancellationException) throw error
-        Logger.w(
-            "Failed fetching recommendation items for " +
-                    "${folder.provider}/${folder.itemId}: $error",
-        )
-        null
-    }
+): List<AppMediaItem>? = fetchMediaItems(
+    Request.Library.recommendationItems(folder.provider, folder.itemId),
+).getOrElse { error ->
+    if (error is CancellationException) throw error
+    Logger.w(
+        "Failed fetching recommendation items for " +
+                "${folder.provider}/${folder.itemId}: $error",
+    )
+    null
 }
 
 /**

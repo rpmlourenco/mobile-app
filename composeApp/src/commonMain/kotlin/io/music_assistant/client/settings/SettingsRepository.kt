@@ -15,6 +15,7 @@ import io.music_assistant.client.ui.theme.ThemeSetting
 import io.music_assistant.client.utils.myJson
 import io.music_assistant.sendspin.api.AudioCodec
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.serialization.Serializable
@@ -734,7 +735,11 @@ class SettingsRepository(
         MutableStateFlow(initial)
     }
 
-    fun viewMode(mediaType: MediaType) = viewModeFlow(mediaType).asStateFlow()
+    // One read-only view per type: Compose restarts a collector when the flow instance changes.
+    private val viewModeViews = mutableMapOf<MediaType, StateFlow<ViewMode>>()
+
+    fun viewMode(mediaType: MediaType): StateFlow<ViewMode> =
+        viewModeViews.getOrPut(mediaType) { viewModeFlow(mediaType).asStateFlow() }
 
     fun setViewMode(mediaType: MediaType, mode: ViewMode) {
         settings.putString(viewModeKey(mediaType), mode.name)
@@ -787,13 +792,10 @@ class SettingsRepository(
     }
 
     // Per-MediaType library-list sort, persisted like view mode and filters. The
-    // ViewModel is the only writer, so a plain get/set is enough — no flow.
-    fun getSortOption(mediaType: MediaType): SortOption {
-        val stored = settings.getStringOrNull(librarySortKey(mediaType))?.let { parseSortOption(it) }
-        // A field dropped from SortConfig by a later app version must not stick.
-        return stored?.takeIf { it.field in SortConfig.fieldsFor(mediaType) }
-            ?: SortConfig.defaultFor(mediaType)
-    }
+    // ViewModel is the only writer, so a plain get/set is enough — no flow. The fields depend on
+    // the server, so `LibrarySortMenu.resolve` checks the value, not this repository.
+    fun getSortOption(mediaType: MediaType): SortOption? =
+        settings.getStringOrNull(librarySortKey(mediaType))?.let { parseSortOption(it) }
 
     fun setSortOption(mediaType: MediaType, option: SortOption) {
         settings.putString(librarySortKey(mediaType), serializeSortOption(option))

@@ -68,6 +68,9 @@ internal class Scheduler(
     /** Lead of the chunk being written, for the first-audio report. */
     private var lastLeadMicros = 0L
 
+    /** The lead averaged over [LEAD_SMOOTHING_MICROS]; null at the start of a continuous run. */
+    private var smoothedLeadMicros: Double? = null
+
     suspend fun run(): Nothing = coroutineScope {
         try {
             while (true) step(this)
@@ -84,23 +87,23 @@ internal class Scheduler(
         if (state.flushGeneration != seenFlush) {
             seenFlush = state.flushGeneration
             handle?.let {
-                if (state.phase == StreamPhase.Ended && played) it.pauseWithFade() else it.pause()
+                it.pause()
                 it.flush()
-                if (state.phase == StreamPhase.Playing) it.resume()
+                if (state.phase == StreamPhase.Playing && !state.held) it.resume()
             }
             // Queued codec frames belong to the discarded timeline.
             decoder.reset()
             framesWritten = 0
             played = false // the next write is a new start: the app must be told again
-            corrector?.reset()
+            restartCorrection()
         }
-        when (state.phase) {
-            StreamPhase.Idle, StreamPhase.Ended -> {
+        when {
+            state.phase != StreamPhase.Playing || state.held -> {
                 publish(AudioPhase.Idle, starved = false)
                 pipeline.wakeups.receive()
             }
 
-            StreamPhase.Playing -> {
+            else -> {
                 if (state.generation != openGeneration) reopen(state, scope)
                 if (handle == null) {
                     pipeline.wakeups.receive()
@@ -141,6 +144,7 @@ internal class Scheduler(
         handle = opened
         format = pcmFormat
         corrector = if (pcmFormat.isPcm) DriftCorrector(pcmFormat.channels, pcmFormat.bitDepth / BITS_PER_BYTE) else null
+        restartCorrection()
         openGeneration = state.generation
         framesWritten = 0
         played = false
@@ -218,6 +222,7 @@ internal class Scheduler(
             val blockMicros = framesToMicros((pcm.size / fmt.bytesPerFrame).toLong(), fmt)
             if (late >= blockMicros) return true // whole chunk is in the past
             val skip = microsToBytes(late, fmt)
+            restartCorrection() // the trim is a deliberate gap: no interpolation across it
             return write(out, pcm, skip, pcm.size - skip)
         }
         if (lead > MAX_SILENCE_MICROS) {
@@ -232,21 +237,43 @@ internal class Scheduler(
                     insertedSilenceMicros += lead
                     logCorrection("early", lead, queuedMicros, position)
                 }
+                restartCorrection() // the silence is a deliberate gap: no interpolation across it
                 write(out, ByteArray(microsToBytes(lead, fmt))) && write(out, pcm)
             }
 
-            abs(lead) > SOFT_TOLERANCE_MICROS -> {
+            else -> {
+                // Inside the tolerance band too: the corrector carries the last frame of the previous
+                // block, so while enabled every block goes through it, even with nothing to correct.
                 val blockMicros = framesToMicros((pcm.size / fmt.bytesPerFrame).toLong(), fmt)
                 val corrected = if (pipeline.softDriftCorrectionEnabled) {
-                    corrector?.correct(pcm, driftMicros = -lead, blockMicros = blockMicros) ?: pcm
+                    val drift = correctionMicros(lead, blockMicros)
+                    corrector?.correct(pcm, driftMicros = drift, blockMicros = blockMicros) ?: pcm
                 } else {
                     pcm
                 }
                 write(out, corrected)
             }
-
-            else -> write(out, pcm)
         }
+    }
+
+    /**
+     * The share of [lead] to correct in this block. One lead reading is noisy by several ms (the head
+     * moves in mixer-period steps, the clock estimate jumps on each probe burst), while the drift to
+     * correct changes over seconds. So the decision uses the smoothed lead, and the correction is
+     * proportional to it: a full correction takes [CORRECTION_HORIZON_MICROS], at four smoothing time
+     * constants so that the loop settles without overshoot.
+     */
+    private fun correctionMicros(lead: Long, blockMicros: Long): Long {
+        val previous = smoothedLeadMicros ?: lead.toDouble()
+        val smoothed = previous + (lead - previous) * blockMicros / (LEAD_SMOOTHING_MICROS + blockMicros)
+        smoothedLeadMicros = smoothed
+        if (abs(smoothed) <= SOFT_TOLERANCE_MICROS) return 0L
+        return (-smoothed * blockMicros / CORRECTION_HORIZON_MICROS).toLong()
+    }
+
+    private fun restartCorrection() {
+        corrector?.reset()
+        smoothedLeadMicros = null
     }
 
     private suspend fun decodeAndWrite(out: SinkHandle, chunk: AudioChunk): Boolean {
@@ -394,8 +421,14 @@ internal class Scheduler(
     private fun microsToBytes(micros: Long, fmt: SinkFormat): Int = (microsToFrames(micros, fmt) * fmt.bytesPerFrame).toInt()
 
     private companion object {
-        /** Below this, do nothing. */
+        /** Below this smoothed lead, do nothing. */
         const val SOFT_TOLERANCE_MICROS = 2_000L
+
+        /** Time constant of the lead average: well above the reading noise, well below the drift. */
+        const val LEAD_SMOOTHING_MICROS = 1_000_000L
+
+        /** Time to correct the whole smoothed lead; four time constants is critical damping. */
+        const val CORRECTION_HORIZON_MICROS = 4 * LEAD_SMOOTHING_MICROS
 
         /** Between soft and hard, resample; beyond, insert silence or drop. */
         const val HARD_TOLERANCE_MICROS = 40_000L

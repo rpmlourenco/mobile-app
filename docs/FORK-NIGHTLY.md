@@ -4,10 +4,15 @@ Fork: https://github.com/rpmlourenco/mobile-app
 
 `origin` is the fork; `upstream` is https://github.com/music-assistant/mobile-app.
 Local `main` tracks `origin/main`. The Android Nightly workflow runs on pushes to
-`main`, manual dispatch, and daily at 03:00 UTC. It builds the checked-out fork
-commit; it does not automatically merge upstream. Schedules run from the default
-branch and GitHub may delay them or disable them after 60 days of inactivity in
-a public repository.
+`main` and manual dispatch. The daily schedule was removed by the repository owner.
+It builds the checked-out fork commit and does not automatically merge upstream.
+
+The local player disables soft drift resampling to preserve PCM samples between
+hard alignment corrections. Both the new smoothed resampler and its zero-drift
+continuity path are bypassed in this mode. The Android pause fade was removed;
+upstream's immediate local Pause/Stop and hold/reconnect handling apply.
+Other personal changes retain the screen-on lyrics default, newest-first albums,
+exact displayed-name artist ordering on legacy servers, and the signed fork package.
 
 ## Signing setup (once)
 
@@ -41,7 +46,7 @@ gh run list --repo rpmlourenco/mobile-app --workflow android-nightly.yml
 ```
 
 Missing secrets produce an explicit failure; there is no debug signing fallback.
-Only trusted fork `main` pushes/manual/scheduled runs use the signing secrets.
+Only trusted fork `main` pushes and manual runs use the signing secrets.
 Existing upstream PR checks remain available without signing secrets.
 
 ## Installation and releases

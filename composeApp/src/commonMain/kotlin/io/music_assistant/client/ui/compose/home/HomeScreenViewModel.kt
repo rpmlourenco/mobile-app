@@ -16,11 +16,14 @@ import io.music_assistant.client.data.model.client.items.Genre
 import io.music_assistant.client.data.model.client.items.RecommendationFolder
 import io.music_assistant.client.data.model.client.items.Track
 import io.music_assistant.client.data.model.server.ServerUser
+import io.music_assistant.client.data.model.server.events.PlaylogUpdatedEvent
 import io.music_assistant.client.data.model.server.supportsLeaderLeave
 import io.music_assistant.client.data.model.server.supportsSleepTimer
 import io.music_assistant.client.data.play.PlayDispatcher
 import io.music_assistant.client.data.play.PlayRequest
+import io.music_assistant.client.data.repository.MediaItemChange
 import io.music_assistant.client.data.repository.MediaItemRepository
+import io.music_assistant.client.data.repository.favoriteAfter
 import io.music_assistant.client.data.repository.fetchRecommendationRowItems
 import io.music_assistant.client.data.repository.fetchRecommendationRows
 import io.music_assistant.client.settings.SettingsRepository
@@ -34,8 +37,11 @@ import io.music_assistant.client.utils.SessionState
 import io.music_assistant.client.utils.resultAs
 import io.music_assistant.sendspin.api.PlayerState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,7 +50,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.sample
@@ -136,6 +146,23 @@ class HomeScreenViewModel(
         apiClient.sessionState
             .map { supportsLeaderLeave((it as? HasConnectionData)?.serverInfo?.schemaVersion) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), false)
+
+    private val dismissedUnsupportedInstall = MutableStateFlow<String?>(null)
+
+    /**
+     * Id of the connected server while it reports `unsupported_install` and the user has not
+     * dismissed the warning for it. The dismissal lasts as long as this ViewModel.
+     */
+    val unsupportedInstallServerId: StateFlow<String?> =
+        combine(apiClient.sessionState, dismissedUnsupportedInstall) { state, dismissed ->
+            (state as? HasConnectionData)?.serverInfo
+                ?.takeIf { it.unsupportedInstall && it.serverId != dismissed }
+                ?.serverId
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), null)
+
+    fun dismissUnsupportedInstall(serverId: String) {
+        dismissedUnsupportedInstall.value = serverId
+    }
 
     private val _connectionState = MutableStateFlow<SessionState>(SessionState.Disconnected.Initial)
     val connectionState = _connectionState.asStateFlow()
@@ -250,8 +277,20 @@ class HomeScreenViewModel(
         // in the recommendations grid.
         viewModelScope.launch {
             mediaItemRepository.itemChanges.collect { change ->
-                (change.item as? Track)?.let { updateRecommendationsIfNeeded(it) }
+                (change.item as? Track)?.let { updateRecommendationsIfNeeded(it, change) }
             }
+        }
+
+        // A played state change moves an item into or out of the play-history rows. The wait
+        // joins the burst of one finished track: the track, then each of its artists. The filter
+        // runs off the main thread, so the other server events never wait for it.
+        viewModelScope.launch {
+            apiClient.events
+                .filterIsInstance<PlaylogUpdatedEvent>()
+                .filter { event -> event.data.userId?.let { it == currentUserId() } ?: true }
+                .flowOn(Dispatchers.Default)
+                .debounce(PLAYLOG_REFRESH_DELAY)
+                .collect { refreshRecommendations() }
         }
     }
 
@@ -294,6 +333,37 @@ class HomeScreenViewModel(
         }
     }
 
+    /**
+     * Fetches the rows again and shows them in one update, so the rows on screen stay until the
+     * answer arrives. A row whose items fail keeps its old items. A running [loadData] wins.
+     */
+    private fun refreshRecommendations() {
+        if (loadDataJob?.isActive == true) return
+        loadDataJob = viewModelScope.launch {
+            val folders = mediaItemRepository.fetchRecommendationRows().getOrElse { error ->
+                if (error is CancellationException) throw error
+                Logger.w("Error refreshing recommendations: $error")
+                return@launch
+            }
+            val rows = coroutineScope {
+                folders.map { folder ->
+                    async {
+                        val items = mediaItemRepository.fetchRecommendationRowItems(folder)
+                            ?: shownRow(folder)?.resolvedItems.orEmpty()
+                        RecommendationRowState(folder, DataState.Data(items))
+                    }
+                }.awaitAll()
+            }
+            setRecommendationRows(rows)
+        }
+    }
+
+    private fun shownRow(folder: RecommendationFolder): RecommendationRowState? =
+        _state.value.recommendations.dataOrNull?.firstOrNull { it.folder.isSameRow(folder) }
+
+    private fun currentUserId(): String? =
+        (apiClient.sessionState.value as? HasConnectionData)?.user?.userId
+
     private fun setRecommendationRows(rows: List<RecommendationRowState>) {
         _state.update { it.copy(recommendations = DataState.Data(rows)) }
     }
@@ -303,7 +373,7 @@ class HomeScreenViewModel(
             val rows = (state.recommendations as? DataState.Data)?.data
                 ?: return@update state
             val updated = rows.map { row ->
-                if (row.folder.itemId == folder.itemId && row.folder.provider == folder.provider) {
+                if (row.folder.isSameRow(folder)) {
                     row.copy(items = DataState.Data(items))
                 } else {
                     row
@@ -354,7 +424,7 @@ class HomeScreenViewModel(
         }
     }
 
-    private fun updateRecommendationsIfNeeded(changed: Track) {
+    private fun updateRecommendationsIfNeeded(changed: Track, change: MediaItemChange) {
         // Read-and-map inside the update lambda so a concurrent recommendations
         // write can never be clobbered with rows derived from a stale read.
         _state.update { state ->
@@ -363,7 +433,11 @@ class HomeScreenViewModel(
             val updated = rows.map { row ->
                 val items = (row.items as? DataState.Data)?.data ?: return@map row
                 val updatedItems = items.map { item ->
-                    if (item is Track && item.hasAnyMappingFrom(changed)) changed else item
+                    if (item is Track && item.hasAnyMappingFrom(changed)) {
+                        changed.withFavorite(change.favoriteAfter(item.favorite))
+                    } else {
+                        item
+                    }
                 }
                 row.copy(items = DataState.Data(updatedItems))
             }
@@ -493,6 +567,7 @@ class HomeScreenViewModel(
     private companion object {
         private const val BUFFER_REAL_INTERVAL = 500L
         private val DEEP_LINK_PLAYER_TIMEOUT = 10.seconds
+        private val PLAYLOG_REFRESH_DELAY = 1.5.seconds
     }
 }
 
@@ -508,3 +583,6 @@ data class RecommendationRowState(
     /** The row's items when resolved, or null while still loading (or on error). */
     val resolvedItems: List<AppMediaItem>? get() = (items as? DataState.Data)?.data
 }
+
+private fun RecommendationFolder.isSameRow(other: RecommendationFolder): Boolean =
+    itemId == other.itemId && provider == other.provider

@@ -18,10 +18,13 @@ val AppMediaItem.supportsAddToPlaylist: Boolean
 /**
  * Long-click menu shows the union: playback block (Play Now / Insert Next & Play / Insert Next /
  * Add to Bottom / Start endless mix) followed by library, favorite, playlist and progress entries.
+ * Each of the latter writes the library, so [canEditLibrary] (`library.write`) gates them all.
  */
 fun resolveLongClickActions(
     item: AppMediaItem,
     clickContext: ClickContext? = null,
+    canEditLibrary: Boolean,
+    dislikeSupported: Boolean,
     librarySupported: Boolean,
     canAddToPlaylist: Boolean,
     canRemoveFromPlaylist: Boolean,
@@ -36,11 +39,10 @@ fun resolveLongClickActions(
     }
     if (item.isPlayable) addPlaybackActions(item, clickContext)
     if (customizationAllowed) add(ItemAction.Customize)
+    if (!canEditLibrary) return@buildList
     if (librarySupported) {
         add(if (item.isInLibrary) ItemAction.RemoveFromLibrary else ItemAction.AddToLibrary)
-        if (item.isInLibrary) {
-            add(if (item.favorite == true) ItemAction.Unfavorite else ItemAction.Favorite)
-        }
+        if (item.isInLibrary) addAll(favoriteActions(item.favorite, dislikeSupported))
     }
     if (canAddToPlaylist) add(ItemAction.AddToPlaylist)
     if (canRemoveFromPlaylist) add(ItemAction.RemoveFromPlaylist)
@@ -90,21 +92,33 @@ private fun MutableList<ItemAction>.addPlaybackActions(
 }
 
 /**
- * Item detail screen three-dot overflow — library/favorite/playlist. Navigation entries
- * (Go to album / artist) are appended separately at the call site via [navigationOptions].
+ * Item detail screen three-dot overflow — library/favorite/playlist, all gated by
+ * [canEditLibrary]. Navigation entries (Go to album / artist) are appended separately at the
+ * call site via [navigationOptions].
  */
 fun resolveDetailOverflowActions(
     item: AppMediaItem,
+    canEditLibrary: Boolean,
+    dislikeSupported: Boolean,
     librarySupported: Boolean,
     canAddToPlaylist: Boolean,
 ): List<ItemAction> = buildList {
+    if (!canEditLibrary) return@buildList
     if (librarySupported) {
         add(if (item.isInLibrary) ItemAction.RemoveFromLibrary else ItemAction.AddToLibrary)
-        if (item.isInLibrary) {
-            add(if (item.favorite == true) ItemAction.Unfavorite else ItemAction.Favorite)
-        }
+        if (item.isInLibrary) addAll(favoriteActions(item.favorite, dislikeSupported))
     }
     if (canAddToPlaylist) add(ItemAction.AddToPlaylist)
+}
+
+/**
+ * The favorite menu entries for the [favorite] state. With [dislikeSupported] (server 2.11), a
+ * dislike gets its own pair of entries, because the heart says "liked" only, like the web app.
+ * Without it, a false is "not a favorite".
+ */
+fun favoriteActions(favorite: Boolean?, dislikeSupported: Boolean): List<ItemAction.SetFavorite> = buildList {
+    add(if (favorite == true) ItemAction.Unfavorite else ItemAction.Favorite)
+    if (dislikeSupported) add(if (favorite == false) ItemAction.RemoveDislike else ItemAction.Dislike)
 }
 
 private fun AppMediaItem.isFullyPlayed(): Boolean = when (this) {

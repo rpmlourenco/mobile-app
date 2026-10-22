@@ -15,23 +15,30 @@ import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.Genre
 import io.music_assistant.client.data.model.client.items.MediaCollection
 import io.music_assistant.client.data.model.client.items.isAiRadioShow
-import io.music_assistant.client.data.model.server.ServerProviderInstance
+import io.music_assistant.client.data.model.server.ListSort
 import io.music_assistant.client.data.play.PlayDispatcher
 import io.music_assistant.client.data.play.PlayRequest
+import io.music_assistant.client.data.repository.LibrarySortMenu
+import io.music_assistant.client.data.repository.LibrarySortRepository
 import io.music_assistant.client.data.repository.MediaItemChange
 import io.music_assistant.client.data.repository.MediaItemRepository
+import io.music_assistant.client.data.repository.ProviderRepository
+import io.music_assistant.client.data.repository.favoriteAfter
 import io.music_assistant.client.settings.SeriesGrouping
 import io.music_assistant.client.settings.SettingsRepository
 import io.music_assistant.client.ui.Timings
 import io.music_assistant.client.ui.compose.common.DataState
 import io.music_assistant.client.ui.compose.common.SelectOption
-import io.music_assistant.client.utils.resultAs
+import io.music_assistant.client.ui.compose.common.mapData
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import musicassistantclient.composeapp.generated.resources.Res
@@ -46,16 +53,19 @@ class LibraryListViewModel(
     private val settingsRepository: SettingsRepository,
     private val mediaItemRepository: MediaItemRepository,
     private val playDispatcher: PlayDispatcher,
+    private val librarySortRepository: LibrarySortRepository,
+    providerRepository: ProviderRepository,
 ) : ViewModel() {
     private val searchTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    // This VM is recreated on every tab re-enter, so the persisted sort is what makes the
+    // choice survive leaving the screen. Null is the list default of the server.
+    private var chosenSort: SortOption? = settingsRepository.getSortOption(mediaType)
 
     private val _state = MutableStateFlow(
         State(
             dataState = DataState.Loading(),
             mediaType = mediaType,
-            // This VM is recreated on every tab re-enter, so the persisted sort is
-            // what makes the choice survive leaving the screen.
-            sortOption = settingsRepository.getSortOption(mediaType),
             seriesGrouping = settingsRepository.getSeriesGrouping(),
         ),
     )
@@ -64,11 +74,24 @@ class LibraryListViewModel(
     private val _toasts = MutableSharedFlow<String>()
     val toasts = _toasts.asSharedFlow()
 
-    // Options for the provider/genre dynamic filters, loaded lazily the first time
-    // the filter sheet asks for them (see loadFilterOptions).
-    private val _providerOptions =
-        MutableStateFlow<DataState<List<SelectOption<String>>>>(DataState.NoData())
-    val providerOptions = _providerOptions.asStateFlow()
+    // Provider filter options follow the shared provider list, so a provider change shows here
+    // while the screen is open. Only music providers that are available and serve this media
+    // type are offered (so a radio-only provider is not offered on Artists).
+    val providerOptions: StateFlow<DataState<List<SelectOption<String>>>> =
+        providerFeatureFor(mediaType)
+            ?.let { feature ->
+                providerRepository.providers.mapData { providers ->
+                    providers
+                        .filter { it.type == "music" && it.available && feature in it.supportedFeatures }
+                        .map { SelectOption(it.instanceId, it.name) }
+                        .sortedBy { it.label.lowercase() }
+                }
+            }
+            ?.stateIn(viewModelScope, SharingStarted.Eagerly, DataState.NoData())
+            ?: MutableStateFlow(DataState.NoData())
+
+    // Genre filter options, loaded lazily the first time the filter sheet asks for them
+    // (see loadFilterOptions).
     private val _genreOptions =
         MutableStateFlow<DataState<List<SelectOption<Int>>>>(DataState.NoData())
     val genreOptions = _genreOptions.asStateFlow()
@@ -99,7 +122,9 @@ class LibraryListViewModel(
             mediaItemRepository.itemChanges.collect { change ->
                 when (change) {
                     // In-place row patch, no refetch.
-                    is MediaItemChange.Updated -> patchFavorite(change.item)
+                    is MediaItemChange.Updated,
+                    is MediaItemChange.FavoriteUpdated,
+                        -> patchItem(change)
                     // Refetch first page so the new row lands in its sorted/filtered
                     // position (matches the "page refresh" semantics for creation).
                     is MediaItemChange.Added ->
@@ -123,17 +148,17 @@ class LibraryListViewModel(
         }
     }
 
-    private fun patchFavorite(updated: AppMediaItem) {
+    private fun patchItem(change: MediaItemChange) {
+        val updated = change.item
         if (updated.mediaType != mediaType) return
         _state.update { st ->
             val data = st.dataState as? DataState.Data ?: return@update st
-            val match = { item: AppMediaItem -> item.matchesIdentityOf(updated) }
-            if (data.data.none(match)) return@update st
-            val patched = if (st.filters.favorite && updated.favorite != true) {
-                // Dropped from the favorites filter; it would be gone on refetch.
-                data.data.filterNot(match)
-            } else {
-                data.data.map { if (match(it)) updated else it }
+            if (data.data.none { it.matchesIdentityOf(updated) }) return@update st
+            val patched = data.data.mapNotNull { item ->
+                if (!item.matchesIdentityOf(updated)) return@mapNotNull item
+                updated.withFavorite(change.favoriteAfter(item.favorite))
+                    // Dropped from the favorites filter; it would be gone on refetch.
+                    .takeUnless { st.filters.favorite && it.favorite != true }
             }
             st.copy(dataState = DataState.Data(patched))
         }
@@ -152,32 +177,12 @@ class LibraryListViewModel(
         settingsRepository.setLibraryFilters(mediaType, filters)
     }
 
-    // Idempotent: fetch options once per VM. The genres list has no provider/genre
-    // filters, so skip the calls entirely there.
+    // Idempotent: fetch genre options once per VM. The genres list has no genre filter,
+    // so skip the call entirely there.
     fun loadFilterOptions() {
         if (optionsRequested || mediaType == MediaType.GENRE) return
         optionsRequested = true
-        loadProviderOptions()
         loadGenreOptions()
-    }
-
-    private fun loadProviderOptions() {
-        val feature = providerFeatureFor(mediaType) ?: return
-        viewModelScope.launch {
-            _providerOptions.update { DataState.Loading() }
-            val providers = apiClient.sendRequest(Request.Provider.all())
-                .resultAs<List<ServerProviderInstance>>()
-            _providerOptions.update {
-                providers
-                    // Only music providers that are available and actually serve this
-                    // media type (so e.g. a radio-only provider isn't offered on Artists).
-                    ?.filter { it.type == "music" && it.available && feature in it.supportedFeatures }
-                    ?.map { SelectOption(it.instanceId, it.name ?: it.domain ?: it.instanceId) }
-                    ?.sortedBy { it.label.lowercase() }
-                    ?.let { DataState.Data(it) }
-                    ?: DataState.Error()
-            }
-        }
     }
 
     private fun loadGenreOptions() {
@@ -186,9 +191,9 @@ class LibraryListViewModel(
             val result = mediaItemRepository.fetchMediaItems(
                 // media_type scopes to genres that have items of this list's type,
                 // which also drops empty/irrelevant genres server-side.
+                // No sort argument: every server version orders by sort name by default.
                 Request.Genre.listLibrary(
                     limit = GENRE_OPTIONS_LIMIT,
-                    orderBy = "sort_name",
                     mediaType = mediaType.serverValue,
                 ),
             )
@@ -232,6 +237,7 @@ class LibraryListViewModel(
     }
 
     fun onSortChanged(sortOption: SortOption) {
+        chosenSort = sortOption
         settingsRepository.setSortOption(mediaType, sortOption)
         _state.update { it.copy(sortOption = sortOption) }
         searchTrigger.tryEmit(Unit)
@@ -247,7 +253,7 @@ class LibraryListViewModel(
 
         viewModelScope.launch {
             val searchQuery = currentState.serverSearchQuery()
-            val orderBy = currentState.sortOption.toServerString(mediaType)
+            val sort = currentState.sortMenu?.sortFor(currentState.sortOption)
 
             _state.update {
                 it.copy(isLoadingMore = true)
@@ -256,7 +262,7 @@ class LibraryListViewModel(
             val request = getRequest(
                 this@LibraryListViewModel.mediaType,
                 currentState.offset,
-                orderBy,
+                sort,
                 searchQuery,
                 currentState.filters,
                 currentState.seriesGrouping,
@@ -288,7 +294,7 @@ class LibraryListViewModel(
     private fun getRequest(
         mediaType: MediaType,
         offset: Int,
-        orderBy: String,
+        sort: ListSort?,
         searchQuery: String?,
         filters: LibraryFilters,
         seriesGrouping: SeriesGrouping,
@@ -301,7 +307,7 @@ class LibraryListViewModel(
                 limit = PAGE_SIZE,
                 offset = offset,
                 search = searchQuery,
-                orderBy = orderBy,
+                sort = sort,
                 favorite = favorite,
                 albumArtistsOnly = filters.albumArtistsOnly,
                 providers = providers,
@@ -312,7 +318,7 @@ class LibraryListViewModel(
                 limit = PAGE_SIZE,
                 offset = offset,
                 search = searchQuery,
-                orderBy = orderBy,
+                sort = sort,
                 favorite = favorite,
                 albumTypes = filters.albumTypes.map { it.serverValue },
                 providers = providers,
@@ -323,7 +329,7 @@ class LibraryListViewModel(
                 limit = PAGE_SIZE,
                 offset = offset,
                 search = searchQuery,
-                orderBy = orderBy,
+                sort = sort,
                 favorite = favorite,
                 providers = providers,
                 genres = genres,
@@ -333,7 +339,7 @@ class LibraryListViewModel(
                 limit = PAGE_SIZE,
                 offset = offset,
                 search = searchQuery,
-                orderBy = orderBy,
+                sort = sort,
                 favorite = favorite,
                 providers = providers,
                 genres = genres,
@@ -343,7 +349,7 @@ class LibraryListViewModel(
                 limit = PAGE_SIZE,
                 offset = offset,
                 search = searchQuery,
-                orderBy = orderBy,
+                sort = sort,
                 favorite = favorite,
                 providers = providers,
                 genres = genres,
@@ -354,7 +360,7 @@ class LibraryListViewModel(
                 limit = PAGE_SIZE,
                 offset = offset,
                 search = searchQuery,
-                orderBy = orderBy,
+                sort = sort,
                 favorite = favorite,
                 providers = providers,
                 genres = genres,
@@ -364,7 +370,7 @@ class LibraryListViewModel(
                 limit = PAGE_SIZE,
                 offset = offset,
                 search = searchQuery,
-                orderBy = orderBy,
+                sort = sort,
                 favorite = favorite,
                 providers = providers,
                 genres = genres,
@@ -374,7 +380,7 @@ class LibraryListViewModel(
                 limit = PAGE_SIZE,
                 offset = offset,
                 search = searchQuery,
-                orderBy = orderBy,
+                sort = sort,
                 favorite = favorite,
                 providers = providers,
                 hideEmpty = filters.hideEmpty.hideEmpty,
@@ -426,13 +432,16 @@ class LibraryListViewModel(
     private fun loadFirstPage() {
         viewModelScope.launch {
             val searchQuery = state.value.serverSearchQuery()
-            val orderBy = state.value.sortOption.toServerString(mediaType)
             updateState(DataState.Loading())
+            // Before the request: a 2.11 server rejects a field that the list does not offer.
+            val sortMenu = librarySortRepository.menu(mediaType)
+            val sortOption = sortMenu.resolve(chosenSort)
+            _state.update { it.copy(sortMenu = sortMenu, sortOption = sortOption) }
 
             val request = getRequest(
                 this@LibraryListViewModel.mediaType,
                 0,
-                orderBy,
+                sortMenu.sortFor(sortOption),
                 searchQuery,
                 state.value.filters,
                 state.value.seriesGrouping,
@@ -492,6 +501,8 @@ class LibraryListViewModel(
         val hasMore: Boolean = true,
         val searchQuery: String = "",
         val sortOption: SortOption = SortConfig.defaultFor(mediaType),
+        // Null until the first page load resolves the sort choices of the server.
+        val sortMenu: LibrarySortMenu? = null,
         val offset: Int = 0,
         // Per-type filter set; only the fields applicable to [mediaType] are surfaced.
         val filters: LibraryFilters = LibraryFilters.DEFAULT,

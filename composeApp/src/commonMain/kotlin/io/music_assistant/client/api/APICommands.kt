@@ -74,6 +74,9 @@ object APICommands {
 
     // Track commands
     const val MUSIC_TRACKS_LIBRARY_ITEMS = "music/tracks/library_items"
+    const val MUSIC_TRACKS_TRACK_ALBUMS = "music/tracks/track_albums"
+    const val MUSIC_TRACKS_TRACK_VERSIONS = "music/tracks/track_versions"
+    const val MUSIC_TRACKS_SIMILAR_TRACKS = "music/tracks/similar_tracks"
 
     // Library commands
     const val MUSIC_LIBRARY_ADD_ITEM = "music/library/add_item"
@@ -83,6 +86,7 @@ object APICommands {
     // Favorites commands
     const val MUSIC_FAVORITES_ADD_ITEM = "music/favorites/add_item"
     const val MUSIC_FAVORITES_REMOVE_ITEM = "music/favorites/remove_item"
+    const val MUSIC_FAVORITES_SET_ITEM = "music/favorites/set_item"
 
     // Mark commands
     const val MUSIC_MARK_PLAYED = "music/mark_played"
@@ -94,6 +98,7 @@ object APICommands {
     // Browse
     const val MUSIC_BROWSE = "music/browse"
     const val MUSIC_SOUND_EFFECTS = "music/sound_effects"
+    const val MUSIC_SORT_OPTIONS = "music/sort_options"
 
     // Search and recommendations
     const val MUSIC_SEARCH = "music/search"
@@ -111,6 +116,7 @@ object APICommands {
     // Auth commands
     const val AUTH_PROVIDERS = "auth/providers"
     const val AUTH_AUTHORIZATION_URL = "auth/authorization_url"
+    const val AUTH_EXCHANGE = "auth/exchange"
     const val AUTH_LOGIN = "auth/login"
     const val AUTH_LOGOUT = "auth/logout"
     const val AUTH_ME = "auth/me"
@@ -134,6 +140,7 @@ object APICommands {
     const val CONFIG_DSP_PRESETS_GET = "config/dsp_presets/get"
 
     // Media type kinds
+    const val KIND_TRACKS = "tracks"
     const val KIND_ALBUMS = "albums"
     const val KIND_ARTISTS = "artists"
     const val KIND_PLAYLISTS = "playlists"

@@ -28,8 +28,8 @@ Five changes in 2.11 need work in the app:
 5. Permissions use scopes and custom roles. The app gates only AI Radio on scopes. Priority:
    medium.
 
-The app constant `LOCAL_SCHEMA_VERSION` is 59. Server 2.10.6 reports schema 65 and dev reports
-96, so every current server triggers the "server ahead" warning on connect.
+The app constant `LOCAL_SCHEMA_VERSION` is 65, the schema of server 2.10.6 and 2.10.7. A 2.10
+server does not trigger the "server ahead" warning. A 2.11 beta (96 or 97) triggers it on connect.
 
 The count of missing listener features is about 35. Most are Easy or Medium. The visualizer is
 not viable on mobile. Party mode, music quiz and smart playlists are Hard.
@@ -39,6 +39,7 @@ not viable on mobile. Party mode, music quiz and smart playlists are Hard.
 | Input | Version | Notes |
 |---|---|---|
 | Server 2.10 | tag `2.10.6` | `API_SCHEMA_VERSION` 65, `MIN_SCHEMA_VERSION` 28 |
+| Server 2.10 patch | tag `2.10.7` (2026-10-17) | schema and models as in 2.10.6; aiosendspin 10.2.0, see 5.10 |
 | Server 2.11 beta | `dev` at 2026-10-16 (`10a3ad5`) | `API_SCHEMA_VERSION` 96, `MIN_SCHEMA_VERSION` 28 |
 | Frontend 2.10 | tag `2.17.297` | bundled with server 2.10.6 |
 | Frontend 2.11 beta | tag `2.17.343` | pinned by server dev; refuses servers below schema 86 |
@@ -162,7 +163,7 @@ Columns: Web 2.10, Web 2.11, Phone, AA (Android Auto), CP (CarPlay).
 | Artist audiobooks row | yes | yes | no | no | no | Missing | `artist_audiobooks` |
 | Album page | yes | yes | yes | drill | drill | Parity | Year shown in the header |
 | Album versions, review, more from artist | yes | yes | no | no | no | Missing | `album_versions` |
-| Track page | yes | yes | no | n/a | n/a | Missing | lyrics, albums, versions, similar tracks |
+| Track page | yes | yes | yes | n/a | n/a | Parity | Albums, versions and similar tracks tabs. Similar shows only if a provider has `similar_tracks`. Lyrics in the overflow menu. Open with "Go to track" or the player title |
 | Playlist page | yes | yes | yes | drill | drill | Parity | Force refresh in the header |
 | Playlist description and featured artists | part | yes | no | no | no | Missing | |
 | Podcast page | yes | yes | yes | drill | drill | Parity | Episode sort by name, date or duration |
@@ -202,7 +203,7 @@ Columns: Web 2.10, Web 2.11, Phone, AA (Android Auto), CP (CarPlay).
 | Feature | Web 2.10 | Web 2.11 | Phone | AA | CP | Class | Note |
 |---|---|---|---|---|---|---|---|
 | Play, pause, next, previous, seek | yes | yes | yes | yes | yes | Parity | |
-| Stop | yes | yes | no | no | no | Missing | Web shows Stop if the player cannot pause |
+| Stop | yes | yes | yes | no | no | Parity | Stop replaces Pause for a radio stream and for an input source without pause support |
 | Skip back and forward for long content | yes | yes | yes | yes | chapters | Parity | 2.11 web uses `player_queues/skip`. App seeks by delta |
 | Shuffle, repeat, crossfade, autoplay | yes | yes | yes | part | part | Parity | Cars show shuffle and repeat |
 | Autoplay locked by repeat indicator | no | yes | no | n/a | n/a | Missing | |
@@ -215,7 +216,7 @@ Columns: Web 2.10, Web 2.11, Phone, AA (Android Auto), CP (CarPlay).
 | Waveform on the seek bar | yes | yes | no | no | no | Missing | `audio_analysis/wave_form` |
 | Visualizer | yes | yes | no | n/a | n/a | Not viable | WebGL and Web Audio in the browser |
 | Stream and quality details | yes | yes | yes | no | no | Parity | |
-| "Played from" container | no | yes | no | no | no | Missing | `QueueItem.origin` |
+| "Played from" container | no | yes | yes | no | no | Parity | `QueueItem.origin` |
 | Ambient sound overlay | yes | yes | yes | no | no | Parity | |
 | Announcements, text and voice | yes | yes | yes | no | no | Parity | Schema 46 and 48 |
 | Transfer queue, clear queue | yes | yes | yes | no | no | Parity | |
@@ -270,7 +271,7 @@ Columns: Web 2.10, Web 2.11, Phone, AA (Android Auto), CP (CarPlay).
 | Chapters and chapter progress | yes | yes | yes | n/a | buttons | Parity | Preference `audiobook_chapter_progress` |
 | Mark played and unplayed | yes | yes | yes | no | no | Parity | |
 | Play episodes from here to the latest | yes | yes | no | no | no | Missing | |
-| Episode and season numbers | no | yes | no | no | no | Missing | `PodcastEpisode.episode_number`, `season` |
+| Episode and season numbers | no | yes | yes | yes | yes | Parity | `PodcastEpisode.episode_number`, `season` |
 | Transcript | no | yes | no | no | no | Missing | |
 | Next unplayed book in a series | yes | yes | yes | yes | yes | Parity | Server starts the first unfinished book |
 
@@ -289,10 +290,10 @@ Columns: Web 2.10, Web 2.11, Phone, AA (Android Auto), CP (CarPlay).
 | Feature | Web 2.10 | Web 2.11 | Phone | AA | CP | Class | Note |
 |---|---|---|---|---|---|---|---|
 | Username and password login | yes | yes | yes | n/a | n/a | Parity | |
-| Home Assistant OAuth | yes | yes | yes | n/a | n/a | Parity | iOS lacks `ASWebAuthenticationSession` |
-| PKCE return to the app | no | yes | no | n/a | n/a | Missing | `auth/exchange`. Needs Remote Access on the server |
+| Home Assistant OAuth | yes | yes | yes | n/a | n/a | Parity | iOS uses `ASWebAuthenticationSession` |
+| PKCE return to the app | no | yes | yes | n/a | n/a | Parity | `auth/exchange` (issue #1184). Remote Access only |
 | Saved token auto-login | yes | yes | yes | n/a | n/a | Parity | |
-| Long-lived token login | yes | yes | no | n/a | n/a | Adjust-partial | `project.md` claims it. No UI exists |
+| Long-lived token login | yes | yes | no | n/a | n/a | Adjust-partial | `project.md` claims it. No UI exists. Decided: add the UI (issue #1202) |
 | Join code login | yes | yes | no | n/a | n/a | Missing | `auth/join_code/exchange` |
 | Logout | yes | yes | yes | n/a | n/a | Parity | |
 | Profile: name, avatar, password, tokens | yes | yes | no | n/a | n/a | Missing | `auth/me`, `auth/user/update`, `auth/tokens` |
@@ -327,13 +328,21 @@ Columns: Web 2.10, Web 2.11, Phone, AA (Android Auto), CP (CarPlay).
 |---|---|---|---|---|---|---|---|
 | Player, queue and media item events | yes | yes | yes | yes | yes | Parity | |
 | `favorite_updated` | no | yes | no | no | no | Adjust-2.11 | See 5.3 |
-| `providers_updated` | yes | yes | no | no | no | Adjust-partial | App never refreshes the provider list |
-| `playlog_updated` | yes | yes | no | no | no | Adjust-partial | Web refreshes in-progress rows |
-| Sleep timer and queue settings events | yes | yes | no | no | no | Adjust-partial | App refetches on the next queue event |
+| `providers_updated` | yes | yes | yes | yes | yes | Parity | `ProviderRepository` loads the list again (#1186) |
+| `playlog_updated` | yes | yes | yes | no | no | Adjust-partial | The phone home rows load again (#1186). The car home tabs do not |
+| Sleep timer and queue settings events | yes | yes | n/a | n/a | n/a | Parity | No server sends `queue_settings_updated`. `player_updated` has the sleep timer |
 | Unsupported install banner | no | yes | no | n/a | n/a | Missing | `server_info.unsupported_install`, schema 87 |
 | Reconnect grace | no | yes | yes | yes | yes | Parity | App transports reconnect with backoff |
 
 ## 5. Adjustments for 2.11
+
+Decisions taken on 2026-10-16:
+
+- The app keeps support for server 2.10.
+- The app gates every 2.11 feature on one constant: the schema version of the 2.11 release.
+  The dev branch reports 96 today. Set the constant to the final number when 2.11.0 ships.
+  The app does not support the earlier 2.11 betas.
+- Tracker: issues #1179 to #1213 on `music-assistant/mobile-app` cover sections 5 to 7.
 
 ### 5.1 Playlist tracks and podcast episodes return one page
 
@@ -371,6 +380,15 @@ Impact: parsing works on both versions. The app cannot show or set a dislike.
 
 Required change: keep the two-call path for 2.10. On 2.11, call `favorites/set_item` and add a
 dislike option to the favorite menu. Gate on the schema or on a feature probe.
+
+Status: done (issue #1187). `supportsDislike` uses `SERVER_2_11_SCHEMA`. On 2.11, each favorite
+menu has two pairs of entries, like the web frontend: "Favorite" or "Unfavorite", and "Dislike" or
+"Remove dislike". The heart of the full player opens the same menu, and a dislike shows a dislike
+icon in the place of the heart. A dislike sends `favorites/set_item` with false. A like and a clear
+keep `add_item` and `remove_item`, like the web frontend. On 2.10, the heart stays a toggle, and
+the app reads false as "not a favorite". Android Auto and CarPlay keep the like toggle. A Siri
+dislike sets a dislike on 2.11 and removes the favorite on 2.10. The app does not offer the
+`favorite=False` list filter.
 
 ### 5.3 The `favorite_updated` event replaces `favorite` in item events
 
@@ -410,6 +428,17 @@ Required change: on 2.11, read `music/sort_options` once per listing and send `s
 `sort_direction`. Keep the static table as the 2.10 fallback. The `label_key` needs a local
 string, because the app does not vendor server translations.
 
+Status: done for the library lists (issue #1185). `sortWireFor` selects `sort_field` from
+`SERVER_2_11_SCHEMA` and `order_by` below it or for an unknown schema. `LibrarySortRepository`
+loads `music/sort_options` once per library list and server, for the phone and for Android Auto.
+A failed load gives the static table, because every 2.11 library list offers its fields. The app
+default stays the list default while the server offers its field, so podcasts stay newest first.
+The server default is `sort_name` for every library list. The app
+drops `random` and `random_play_count`, because a paged list in a random order repeats items. The
+web frontend drops them for the same reason. The app labels an option by its field, and every
+`label_key` on dev is equal to its field. The sub-item lists keep the static table and sort on
+the client, like the web frontend.
+
 ### 5.5 Scopes and custom roles
 
 What changed: the web frontend replaced the admin flag with `authManager.hasScope()`. Custom
@@ -424,6 +453,13 @@ Impact: a user without `library.write` sees actions that fail with an error toas
 
 Required change: read `auth/scopes` after login and hide the actions that the user cannot run.
 Gate on scopes, never on the role string.
+
+Status: done (issue #1182). `MainDataSource.grantedScopes` holds the scopes of the user, and the
+gate fails closed. `library.write` gates the library actions in all menus, the player heart, the
+stream favorite, add to playlist, create playlist, the media session and Siri. `config.players.write`
+gates the DSP entry and the car DSP action. Grouping has no gate, because
+`players/cmd/set_members` needs only `players.control`. Every builtin role and every custom role has
+that scope. The app sends no `library.manage` command.
 
 ### 5.6 Sendspin spec 1.0.0-rc1
 
@@ -444,21 +480,33 @@ changes that affect a player client:
 - Pairing uses "pairing code" instead of PIN. A pairing code attempt on a paired client always
   re-pairs it.
 
-What the app does: `sendspin/wire/Messages.kt` sends `trust_level` (line 77), a list of
-`PairMethodDescriptor(method)` (lines 80 and 92) and `supported_commands` in `client/hello`
-(line 110). The JSON config has `ignoreUnknownKeys` and `coerceInputValues`
-(`sendspin/wire/SendspinJson.kt:14-15`), so additive server fields do not break decoding.
+Correction: `trust_level` is a `client/hello` field, not a handshake field. Noise message 1
+carries `psk_id` on 9.x and `psk_id` plus `psk_category` on 10.x. The client ignores the extra
+key, so the 9.x wire connects to a 10.x server as a non-compliant client.
 
 Impact: the server accepts the old wire by default. `allow_legacy_clients` defaults to true and
-maps to `allow_noncompliant_clients` (dev `server/providers/sendspin/provider.py:466-474`). The
-server logs the device name and software version in a noncompliance warning. If an admin turns
-the toggle off, the local player cannot connect. The pairing constants also changed to
-`unpaired_with_input` and `unpaired_without_input`.
+maps to `allow_noncompliant_clients` and `allow_unencrypted` (dev
+`server/providers/sendspin/provider.py`). The server logs the device name and software version
+in a noncompliance warning. If an admin turns the toggle off, a 9.x client cannot connect.
 
-Required change: move the `:sendspin` module to spec 1.0.0-rc1. This is a large change. The
-module must keep the old wire for 2.10 servers, or the app must drop local playback on 2.10.
-Decide before the 2.11 release. This report does not check the aiosendspin 10.x package itself,
-only its release notes.
+Server 2.10.7 also pins `aiosendspin` 10.2.0, the same version as dev on 2026-10-17. Its schema
+stays at 65, the same as 2.10.6. So the schema cannot tell the two servers apart. The 2.11 betas
+are not the same: 2.11.0b1 to b3 pin 9.1.1, and b4 and b5 pin 10.0.x.
+
+The handshake does not give the server version. Both 9.1.1 and 10.2.0 send `server/init` with
+`version` 1. `server/hello` has no version, and it comes after `client/hello`, which is different
+on each wire. Only the `psk_category` key in Noise message 1 is different. The app does not select
+the wire from the presence of a key.
+
+Status: done (issue #1181). The module speaks both wires (`WireVersion`). `sendspinWireFor` selects
+`SPEC_1_0` for a schema of `SERVER_2_11_SCHEMA` or higher. It also selects `SPEC_1_0` for a
+`server_version` of 2.10.7 or a later 2.10 release. All other servers get `LEGACY_9`. This
+includes the 2.11 betas below `SERVER_2_11_SCHEMA` and a source build, which reports `0.0.0`. The
+player sends `required_lead_time_ms` 250 and `min_buffer_ms` 1000. The client parses
+`send_ahead` and `pairing.format` but does not use them. The pairing code methods, artwork,
+`server/state` and `stream/end` changes do not apply to a player-only client. See
+`.claude/architecture.md`, Sendspin Integration, for the full list of differences. The 10.x
+details come from the spec and the aiosendspin source.
 
 ### 5.7 AI Radio
 
@@ -491,12 +539,25 @@ Impact: none for login. PKCE is an opportunity, not a break.
 Required change: none for login. Use PKCE on 2.11 to fix the iOS OAuth return. Keep the current
 flow for 2.10.
 
+Status: done (issue #1184). iOS already used `ASWebAuthenticationSession` before this change. Over
+Remote Access on 2.11, with a provider that sets `supports_remote_app`, the app sends a PKCE
+challenge and `redirect_target` "app". The `app.music-assistant.io` callback page opens
+`musicassistant://auth/callback` with `code` and `state`, and the app completes the sign-in with
+`auth/exchange`. All other sessions keep the server callback flow. The server does not need an External
+URL on the PKCE path. See `.claude/settings-screen.md`.
+
 ### 5.9 Other 2.11 changes
 
-- `ServerInfoMessage.unsupported_install` (schema 87). The web shows a banner. The app ignores
-  the field. Add a dismissible banner.
-- `providers_updated` payloads are filtered per user. The app ignores the event and never
-  refreshes the "Music sources" filter list after a provider change.
+- `ServerInfoMessage.unsupported_install` (schema 87). The web shows a banner on its settings
+  pages. Status: done (issue #1183). `ServerInfo.unsupportedInstall` reads the flag.
+  `UnsupportedInstallCard` shows on the home screen with a Settings button, because the user can
+  connect to another server there. The user can dismiss the home card for each server. The
+  settings server section shows the card at all times. The flag is true when the server has no official build
+  information (dev `music_assistant/mass.py`). It shows the installation method, not the server
+  version. Server 2.10 does not send the field, so the app reads false.
+- `providers_updated` payloads are filtered per user. Status: done (issue #1186).
+  `ProviderRepository` owns the provider list and loads it again on the event. The app does not
+  use the payload, because server 2.10 sends the list without the provider filter of the user.
 - Playlist visibility changes send a synthesized `media_item_deleted`. The app handles the event,
   so shared playlists disappear correctly.
 - `player_queues/play_media` gained `sort_field` and `sort_direction`. The app sends neither
@@ -504,10 +565,38 @@ flow for 2.10.
 - New fields the app can show: `QueueItem.origin`, `Radio.is_endless`,
   `PodcastEpisode.episode_number` and `season`, `Playlist.access`, `PlayLogEntry.seek_position`,
   `AudioMetadata.camelot_key`.
+- `PodcastEpisode.episode_number` and `season` (schema 85) and `QueueItem.origin` (schema 90).
+  Status: done (issue #1188). An episode subtitle starts with "S2 E5", or with "E5" if the
+  episode has no season. The phone, Android Auto and CarPlay show it. The stream details dialog
+  shows "Playing from" with the container of `origin`. The text opens the details screen of the
+  container if the app has one. A folder shows as text only. An older server does not send the
+  fields, so the app shows nothing. These fields need no schema gate.
+- `Radio.is_endless` (schema 88) and the finite station tracklist moved to issue #1190. Only
+  AI Radio shows are finite. `radio_tracks` returns a new shuffled snapshot on each call, so the
+  list does not match the order that plays.
 - The frontend 2.11 refuses servers below schema 86. The app has no minimum of its own. The app
-  constant `LOCAL_SCHEMA_VERSION` is 59 (`app/data/model/server/ServerInfo.kt:7`). Server 2.10.6
-  reports 65, so the "server ahead" dialog appears on every connect. Bump the constant after the
-  2.11 changes above land.
+  constant `LOCAL_SCHEMA_VERSION` is 65 (`app/data/model/server/ServerInfo.kt:7`), because the app
+  was checked against server 2.10.6 and 2.10.7. Both report 65, so they show no dialog. The nightly
+  `2.11.0.dev2026101703` reports 96. The `dev` branch reports 97 after server PR #7050, which adds
+  counts to the artist lists. Dev now increments the schema for each new command or field that a
+  client can check. Set the constant to the schema of the 2.11.0 release, not to a dev value.
+- A higher `LOCAL_SCHEMA_VERSION` does not make a 2.10 server unsupported. The app shows a
+  warning only if the server schema is above the app constant, or if the app constant is below
+  the server `MIN_SCHEMA_VERSION`. Every server version has a `MIN_SCHEMA_VERSION` of 28.
+
+### 5.10 Server 2.10.7
+
+Server 2.10.7 was released on 2026-10-17. It has 78 commits after 2.10.6. These items apply to
+the app:
+
+- The schema stays at 65 and the models stay at 1.1.205. The paging, favorite and sort
+  behavior is the same as in 2.10.6, so the 2.11 gates stay off. This is correct.
+- The Sendspin provider pins `aiosendspin` 10.2.0 (server PR #6716 and the later bumps). See 5.6
+  for the wire selection.
+- `auth/authorization_url` now checks `return_url` and refuses a URL that is not permitted. The
+  pattern list has `musicassistant://`, so the app OAuth flow continues to work.
+- Server PR #6849 repairs the Home Assistant sign-in from the mobile app through the External URL
+  or Remote Access.
 
 ## 6. Adjustments for partial implementations
 
@@ -520,7 +609,7 @@ flow for 2.10.
 | Show info | Info sheet for every item type | Tracks and radios have no screen | `app/ui/compose/item/ItemDetailsScreen.kt` | Easy |
 | Players that need setup | Setup warning and setup-only menu | Listed only. Setup is admin work | `app/ui/compose/home/players/` | Decided |
 | Retry after a load failure | Retry button in the list | Check each list error state for a retry action | `app/ui/compose/library/` | Easy |
-| Event coverage | Reacts to `providers_updated`, `playlog_updated`, sleep timer and queue settings events | Ignores them | `app/api/Event.kt`, `app/data/MainDataSource.kt` | Easy |
+| Event coverage | Reacts to `providers_updated`, `playlog_updated`, sleep timer and queue settings events | Done (#1186). No server sends `queue_settings_updated`, and `player_updated` has the sleep timer | `app/api/Event.kt`, `app/data/repository/ProviderRepository.kt` | Done |
 | Localized login errors | Shows the server text | Shows the server text. On 2.11 the text is already localized | `app/auth/AuthenticationManager.kt` | None |
 | Android Auto tabs | n/a | No Tracks tab and no Genres tab | `aa/auto/AutoLibrary.kt` | Easy |
 | CarPlay docs | n/a | `carplay.md` lists 7 categories. The code offers 7 without Tracks and with AI Radio | `.claude/carplay.md` | Easy |
@@ -530,7 +619,7 @@ flow for 2.10.
 
 | Feature | API | Feasibility | Mobile constraint and sketch |
 |---|---|---|---|
-| Track detail screen | `tracks/get_track`, `track_albums`, `track_versions`, `similar_tracks`, `metadata/get_track_lyrics` | Easy | Add a `Track` case to `ItemDetailsScreen` with tabs for albums, versions and similar tracks |
+| Track detail screen | `tracks/get_track`, `track_albums`, `track_versions`, `similar_tracks`, `metadata/get_track_lyrics` | Easy | Done (issue #1189). A `Track` case in `ItemDetailsScreen` with tabs for albums, versions and similar tracks |
 | Radio detail screen | `radios/get_radio`, `radio_versions`, `radio_tracks` (2.11) | Easy | Same pattern. Show the tracklist for finite stations on 2.11 |
 | Podcast episode screen with transcript | `podcasts/podcast_episode`, `podcast_episode_transcript` (2.11) | Medium | Episode page with steppers. Feed the cues into `LyricsSheet` timing |
 | Artist appears on, singles, discography | `artist_appears_on`, `discography` (2.11) | Medium | Two more artist sections. Discography items carry provider `musicbrainz`. Show them dimmed and offer "Add to library" only |
@@ -540,7 +629,6 @@ flow for 2.10.
 | Dislike | `favorites/set_item` (2.11) | Easy | Three-state heart menu. Hide on 2.10 |
 | Save queue as playlist | `player_queues/save_as_playlist` | Easy | Menu item in the player overflow |
 | Queue move to next, move to end, item radio | `move_item`, `move_item_end` | Easy | Three more long-press actions in `CollapsibleQueue` |
-| Stop | `players/cmd/stop` | Easy | Show Stop if the player lacks `PlayerFeature.PAUSE` |
 | Replace next, play shuffled, play from beginning | `play_media` options | Easy | More `QueueOption` cases in `ItemActionResolver` |
 | Playlist rename, image, delete | `playlists/update`, `library/remove_item` | Easy | Needs `library.write`. Hide if the scope is absent |
 | Playlist sharing and collaboration | `playlists/set_access`, `config/providers/share_candidates` (2.11) | Medium | A dialog with a user picker. Needs the `Playlist.access` DTO |
@@ -595,7 +683,8 @@ Home Assistant panel history, onboarding, expert mode, and the guided tour.
 
 ## 9. Unverified items
 
-- The aiosendspin 10.x wire is known from release notes only. The package was not inspected.
+- The aiosendspin 10.x wire is known from the spec and the package source. The 9.1.1 and 10.2.0
+  wheels were compared for the handshake only. No device test was done on the 1.0 wire.
 - The semantics of a provider-side `favorite=False` sync are not verified.
 - The schema bumps 66 to 96 have no per-version changelog in the server tree. Only
   `unsupported_install` is annotated (schema 87).
@@ -608,9 +697,9 @@ Home Assistant panel history, onboarding, expert mode, and the guided tour.
    `order_by` argument. Safe on 2.10.
 2. Handle `favorite_updated`. Stop reading `favorite` from `media_item_updated` on 2.11.
 3. Read `auth/scopes` once and gate the write actions.
-4. Bump `LOCAL_SCHEMA_VERSION`. Add the unsupported install banner.
+4. Bump `LOCAL_SCHEMA_VERSION` to the 2.11.0 release schema. Add the unsupported install banner.
 5. Decide the Sendspin wire strategy for 2.11 and schedule the module update.
-6. Quick wins from section 7: track and radio screens, stop, save queue as playlist, queue
+6. Quick wins from section 7: track and radio screens, save queue as playlist, queue
    actions, dislike, playlist rename and delete, refresh item, genre search.
 7. Server-driven sort options on 2.11.
 8. Medium items by user demand: episode page with transcript, artist discography, profile and

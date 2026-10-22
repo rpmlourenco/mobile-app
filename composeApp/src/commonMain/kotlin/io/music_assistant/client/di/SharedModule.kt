@@ -10,9 +10,11 @@ import io.music_assistant.client.connection.ConnectionManager
 import io.music_assistant.client.data.CarDspApplier
 import io.music_assistant.client.data.LocalPlayerAdapter
 import io.music_assistant.client.data.LocalPlayerEndpoints
+import io.music_assistant.client.data.LocalPlayerFactory
 import io.music_assistant.client.data.MainDataSource
 import io.music_assistant.client.data.PlayerPositionTracker
 import io.music_assistant.client.data.PlayerRequestFactory
+import io.music_assistant.client.data.SendspinLocalPlayerFactory
 import io.music_assistant.client.data.UserPreferences
 import io.music_assistant.client.data.announcement.AnnouncementRepository
 import io.music_assistant.client.data.factory.MediaItemFactory
@@ -20,7 +22,9 @@ import io.music_assistant.client.data.factory.PlayerFactory
 import io.music_assistant.client.data.factory.QueueFactory
 import io.music_assistant.client.data.play.PlayDispatcher
 import io.music_assistant.client.data.repository.AiRadioRepository
+import io.music_assistant.client.data.repository.LibrarySortRepository
 import io.music_assistant.client.data.repository.MediaItemRepository
+import io.music_assistant.client.data.repository.ProviderRepository
 import io.music_assistant.client.data.repository.QueueOverlayRepository
 import io.music_assistant.client.data.repository.ServiceClientMediaItemRepository
 import io.music_assistant.client.imageloader.ArtworkDiskStore
@@ -141,6 +145,7 @@ fun sharedModule(
         single { UserPreferences() }        // Server-synced `auth/me` preferences
         singleOf(::PlayerRequestFactory)    // Pure PlayerAction → Request mapper
         single { LocalPlayerEndpoints(get(), get(), CoroutineScope(SupervisorJob() + Dispatchers.Default)) }
+        single<LocalPlayerFactory> { SendspinLocalPlayerFactory(get(), get(), get(), get(), get(), get()) }
         singleOf(::LocalPlayerAdapter)      // Local player: app side of the Sendspin module
         singleOf(::MediaItemFactory)        // Stateless DTO → domain mapper
         singleOf(::PlayerFactory)           // Stateless DTO → domain mapper
@@ -155,9 +160,16 @@ fun sharedModule(
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
             )
         }
+        single {                            // Sole owner of the `providers` list
+            ProviderRepository(
+                apiClient = get(),
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            )
+        }
         single {                            // Queue ambient sound overlay; Apply outlives the dialog
             QueueOverlayRepository(
                 apiClient = get(),
+                providerRepository = get(),
                 mediaItemFactory = get(),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
             )
@@ -168,7 +180,8 @@ fun sharedModule(
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
             )
         }
-        singleOf(::ServiceClientMediaItemRepository) { bind<MediaItemRepository>() }
+        single<MediaItemRepository> { ServiceClientMediaItemRepository(get(), get()) }
+        singleOf(::LibrarySortRepository)   // Library sort choices; caches the 2.11 sort_options
         singleOf(::MainDataSource)          // Singleton - held by foreground service
         single(createdAtStart = true) {     // Eager - must observe car edges from launch
             CarDspApplier(get(), get(), get(), get())
@@ -191,10 +204,11 @@ fun sharedModule(
             )
         }
         factory { LibraryCategoriesViewModel(get(), get()) }
-        factory { params -> LibraryListViewModel(params[0], get(), get(), get(), get(), get()) }
+        factory { params -> LibraryListViewModel(params[0], get(), get(), get(), get(), get(), get(), get()) }
         factory { params -> BrowseViewModel(params.getOrNull<String>(), get(), get(), get()) }
         factory { params ->
             ItemDetailsViewModel(
+                get(),
                 get(),
                 get(),
                 get(),
@@ -213,7 +227,7 @@ fun sharedModule(
         factory { QueueDjViewModel(get(), get<MainDataSource>().aiRadioQueueDjAvailable) }
         factory { HomeScreenViewModel(get(), get(), get(), get(), get()) }
         factory { SearchViewModel(get(), get(), get()) }
-        factory { ProviderViewModel(get()) }
+        factory { ProviderViewModel(get(), get()) }
     }
 
 /**

@@ -20,6 +20,7 @@ import kotlinx.coroutines.test.currentTime
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
@@ -33,6 +34,7 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalCoroutinesApi::class)
 class AudioPipelineTest {
     private val flac = StreamStartPlayer("flac", 48_000, 2, 16)
+    private val ramp8k = StreamStartPlayer("flac", 8_000, 2, 16)
     private val bytesPerFrame = 4
 
     private inner class Harness(val scope: TestScope, synced: Boolean = true) {
@@ -98,7 +100,6 @@ class AudioPipelineTest {
         runCurrent()
         assertEquals(AudioPhase.Idle, h.pipeline.status.value.phase)
         assertTrue(h.handle.paused)
-        assertEquals(1, h.handle.fadedPauses)
         assertEquals(1, h.handle.flushes)
         assertFalse(h.handle.closed, "the sink stays warm after stream/end")
     }
@@ -135,6 +136,56 @@ class AudioPipelineTest {
         val seen = generateSequence { h.events.tryReceive().getOrNull() }.toList()
         assertEquals(listOf(AudioEvent.Ended, AudioEvent.Cleared, AudioEvent.Started), seen)
         assertEquals(StreamPhase.Playing, h.pipeline.phase)
+    }
+
+    @Test
+    fun holdSilencesAtOnceDiscardsAudioAndReleasePlaysTheNextAudio() = pipelineTest { h ->
+        h.pipeline.apply(StreamAction.StartFresh(flac))
+        runCurrent()
+        h.feed(0, 1_000, 2_000)
+        runCurrent()
+        assertEquals(AudioEvent.Started, h.events.tryReceive().getOrNull())
+        val writes = h.handle.writes.size
+
+        h.pipeline.hold(true)
+        runCurrent()
+        assertTrue(h.handle.paused, "the sink stops without a server message")
+        assertEquals(1, h.handle.flushes)
+        assertTrue(h.pipeline.buffer.isEmpty, "the stopped timeline is discarded")
+        assertEquals(AudioPhase.Idle, h.pipeline.status.value.phase)
+        h.feed(3_000)
+        advanceTimeBy(5_000)
+        runCurrent()
+        assertEquals(writes, h.handle.writes.size, "audio that arrives while held is never played")
+        assertTrue(h.pipeline.buffer.isEmpty)
+
+        h.pipeline.hold(false)
+        runCurrent()
+        assertFalse(h.handle.paused)
+        h.feed(currentTime + 100)
+        advanceTimeBy(200)
+        runCurrent()
+        assertTrue(h.handle.writes.size > writes)
+        assertEquals(AudioEvent.Started, h.events.tryReceive().getOrNull(), "a release is a new start for the app")
+        assertTrue(h.events.isEmpty, "a hold reports no stop: the app asked for it")
+    }
+
+    @Test
+    fun aStreamStartWhileHeldOpensNothingUntilRelease() = pipelineTest { h ->
+        h.pipeline.hold(true)
+        h.pipeline.apply(StreamAction.StartFresh(flac)) // a reconnect while the local pause is in flight
+        runCurrent()
+        h.feed(0, 10)
+        runCurrent()
+        assertTrue(h.sink.handles.isEmpty(), "no sink while held")
+        assertEquals(StreamPhase.Playing, h.pipeline.phase, "the lifecycle still follows the server")
+
+        h.pipeline.hold(false)
+        runCurrent()
+        assertEquals(1, h.sink.handles.size)
+        h.feed(0)
+        runCurrent()
+        assertEquals(1, h.handle.writes.size)
     }
 
     @Test
@@ -178,22 +229,67 @@ class AudioPipelineTest {
         assertEquals(5, h.handle.writes.size)
     }
 
+    /**
+     * Feeds 10 ms chunks of an 8 kHz rising ramp, 4 per frame, and returns the bytes fed: an interpolated
+     * frame then lands between two input values. Time stands still and every write is queued, so each
+     * chunk's lead is minus the sink latency set for it.
+     */
+    private fun TestScope.feedRamp(h: Harness, leadsMillis: List<Int>): ByteArray =
+        leadsMillis.mapIndexed { n, leadMillis ->
+            h.sink.latencyMicros = -leadMillis * 1_000L
+            val bytes = ByteArray(80 * bytesPerFrame)
+            for (i in 0 until 80) {
+                val v = (n * 80 + i) * 4 // positive: the corrector truncates toward zero, a floor only here
+                for (ch in 0..1) {
+                    bytes[i * bytesPerFrame + ch * 2] = v.toByte()
+                    bytes[i * bytesPerFrame + ch * 2 + 1] = (v shr 8).toByte()
+                }
+            }
+            h.pipeline.onAudio(AudioChunk(n * 10_000L, bytes, 0))
+            runCurrent()
+            bytes
+        }.reduce(ByteArray::plus)
+
     @Test
-    fun standaloneQualityModeDoesNotResampleSmallDrift() = pipelineTest { h ->
+    fun resamplingThatStartsAndStopsKeepsTheSignalContinuous() = pipelineTest { h ->
+        h.pipeline.apply(StreamAction.StartFresh(ramp8k))
+        runCurrent()
+        // Sustained leads move the smoothed lead out of the 2 ms band, back through it, out to the
+        // other side, and in and out once more.
+        val leads = List(1) { 0 } + List(20) { 35 } + List(40) { -35 } + List(5) { 0 } + List(30) { 35 }
+        val input = feedRamp(h, leads)
+        val pcm = h.handle.writes.reduce(ByteArray::plus)
+        assertFalse(pcm.contentEquals(input), "the corrector never ran")
+        val left = (0 until pcm.size / bytesPerFrame).map { f ->
+            (pcm[f * bytesPerFrame].toInt() and 0xFF) or (pcm[f * bytesPerFrame + 1].toInt() shl 8)
+        }
+        // A resample at most 0.2% off keeps every step in 3..5; a lost or a stale frame does not.
+        left.zipWithNext { a, b -> b - a }.forEachIndexed { f, step ->
+            assertTrue(step in 3..5, "frame ${f + 1}: step $step (a lost or a stale frame)")
+        }
+    }
+
+    @Test
+    fun aLeadThatJittersAroundZeroIsNotCorrected() = pipelineTest { h ->
+        h.pipeline.apply(StreamAction.StartFresh(ramp8k))
+        runCurrent()
+        // One reading is off by 10 ms either way (a coarse playback head); the average stays at zero.
+        val leads = listOf(0) + List(40) { if (it % 2 == 0) 10 else -10 }
+        val input = feedRamp(h, leads)
+        assertContentEquals(input, h.handle.writes.reduce(ByteArray::plus))
+    }
+
+    @Test
+    fun standaloneQualityModePreservesEveryPcmByteAcrossDriftChanges() = pipelineTest { h ->
         h.pipeline.softDriftCorrectionEnabled = false
-        h.pipeline.apply(StreamAction.StartFresh(flac))
+        h.pipeline.apply(StreamAction.StartFresh(ramp8k))
         runCurrent()
-        h.pipeline.onAudio(h.chunk(dueMillis = 0, millis = 100))
-        runCurrent()
-        val plainSize = h.handle.writes.single().size
-
-        // 100 ms remains queued, so this block is 30 ms early: normally inside
-        // the soft-correction band and therefore resampled slightly longer.
-        h.pipeline.onAudio(h.chunk(dueMillis = 130, millis = 100))
-        runCurrent()
-
-        assertEquals(2, h.handle.writes.size)
-        assertEquals(plainSize, h.handle.writes[1].size)
+        // Cross both soft-correction bands with real sample data. Disabling correction
+        // must bypass even the zero-drift interpolation path and its carried frame.
+        val leads = List(1) { 0 } + List(20) { 35 } + List(40) { -35 } + List(5) { 0 } + List(30) { 35 }
+        val input = feedRamp(h, leads)
+        val output = h.handle.writes.reduce(ByteArray::plus)
+        assertContentEquals(input, output, "standalone PCM bytes changed")
     }
 
     @Test
@@ -356,7 +452,6 @@ class AudioPipelineTest {
         assertEquals(1, h.decoders.created.size)
         assertEquals(1, h.decoders.created.single().resets, "the codec drops the discarded timeline")
         assertEquals(1, h.handle.flushes)
-        assertEquals(0, h.handle.fadedPauses, "track restart must not fade the continuous output")
         assertTrue(h.pipeline.buffer.isEmpty)
         h.feed(0) // the de-dup memory is reset with the timeline
         runCurrent()

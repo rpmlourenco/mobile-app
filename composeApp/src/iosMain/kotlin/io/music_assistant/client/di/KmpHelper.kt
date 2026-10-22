@@ -63,6 +63,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.koin.core.component.KoinComponent
 import org.koin.core.component.inject
@@ -178,20 +179,24 @@ object KmpHelper : KoinComponent {
         completion: (NativeArtworkResult?) -> Unit,
     ): Cancellable {
         val job = scope.launch {
-            val result = try {
-                val freshToken = artworkRepository.resolveFreshToken(urlString)
-                if (freshToken != null && cachedVersion?.invoke(freshToken) == true) {
-                    null
-                } else {
-                    artworkRepository.load(urlString).let {
-                        NativeArtworkResult(it.bytes.toNSData(), it.mimeType, it.token, it.reusable)
+            // Hashing and byte copies run off main; only [completion] runs on [scope]. The
+            // [cachedVersion] probe runs off main too: Swift backs it with a thread-safe NSCache.
+            val result = withContext(Dispatchers.Default) {
+                try {
+                    val freshToken = artworkRepository.resolveFreshToken(urlString)
+                    if (freshToken != null && cachedVersion?.invoke(freshToken) == true) {
+                        null
+                    } else {
+                        artworkRepository.load(urlString).let {
+                            NativeArtworkResult(it.bytes.toNSData(), it.mimeType, it.token, it.reusable)
+                        }
                     }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Throwable) {
+                    log.w { "Artwork pre-flight failed (${e::class.simpleName ?: "Throwable"})" }
+                    null
                 }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Throwable) {
-                log.w { "Artwork pre-flight failed (${e::class.simpleName ?: "Throwable"})" }
-                null
             }
             completion(result)
         }
@@ -283,7 +288,10 @@ object KmpHelper : KoinComponent {
         val startMs = currentTimeMillis()
         log.i { "fetch[$label] start" }
         mainScope.launch {
-            val items: List<T>? = withTimeoutOrNull(FETCH_TIMEOUT_MS) { fetch() }
+            // Decode, mapping and post-processing run off main; [completion] stays on main for Swift.
+            val items: List<T>? = withTimeoutOrNull(FETCH_TIMEOUT_MS) {
+                withContext(Dispatchers.Default) { fetch() }
+            }
             val elapsed = currentTimeMillis() - startMs
             if (items == null) {
                 log.i { "fetch[$label] timeout after ${elapsed}ms" }
@@ -451,13 +459,13 @@ object KmpHelper : KoinComponent {
         completion: (List<AppMediaItem>?) -> Unit,
     ) {
         launchFetch("tracksByPlaylist:${playlist.itemId}", completion) {
-            mediaItemRepository.fetchMediaItems(
+            mediaItemRepository.fetchAllMediaItems(
                 Request.Playlist.getTracks(
                     itemId = playlist.itemId,
                     providerInstanceIdOrDomain = playlist.provider,
                     forceRefresh = null,
                 ),
-            ).getOrNull()
+            )
                 // A playlist also holds radio stations, podcast episodes and audiobooks.
                 ?.filter { it is PlayableItem }
                 ?: emptyList()
@@ -469,12 +477,12 @@ object KmpHelper : KoinComponent {
         completion: (List<AppMediaItem>?) -> Unit,
     ) {
         launchFetch("episodesByPodcast:${podcast.itemId}", completion) {
-            mediaItemRepository.fetchMediaItems(
+            mediaItemRepository.fetchAllMediaItems(
                 Request.Podcast.getEpisodes(
                     itemId = podcast.itemId,
                     providerInstanceIdOrDomain = podcast.provider,
                 ),
-            ).getOrNull()
+            )
                 ?.filterIsInstance<PodcastEpisode>()
                 ?.clientSorted(
                     SortConfig.defaultFor(SubItemContext.PODCAST_EPISODES),
@@ -603,31 +611,26 @@ object KmpHelper : KoinComponent {
     /**
      * Set the favorite flag on an [AppMediaItem]. Drives `INMediaAffinityIntent`
      * mapping from Swift: `like` ⇒ `favorite = true`, `dislike` ⇒ `favorite = false`.
-     * MA only tracks favorites as a boolean — dislike removes an existing favorite
-     * but cannot record an explicit "do not play this" signal. Adding requires a
-     * URI; removal works by id+mediaType.
+     * From server 2.11 ([MainDataSource.dislikeSupported]) a dislike is recorded as one;
+     * an older server has no dislike, so there it removes an existing favorite. Writes
+     * go through [MainDataSource.setFavorite], so the now-playing heart follows at once.
+     * A like and a dislike need a URI ([AppMediaItem.mediaUri]); removal works by
+     * id+mediaType.
      *
      * Returns `true` synchronously when the request was dispatched, `false` when
-     * we couldn't form a valid request (the only known failure mode today: an
-     * add for an item with no URI). Network outcome is fire-and-forget — Swift
-     * uses the synchronous return to avoid lying to Siri about success.
+     * the user's role lacks `library.write` or we couldn't form a valid request
+     * (a like or dislike for an item with no URI). Network outcome is fire-and-forget —
+     * Swift uses the synchronous return to avoid lying to Siri about success.
      */
     fun setFavorite(item: AppMediaItem, favorite: Boolean): Boolean {
-        if (favorite) {
-            // Prefer plain `uri`; fall back to `mediaUri`. The base class uses
-            // `uri` directly; subclasses like Genre override `mediaUri` to
-            // synthesize one when the server didn't supply it.
-            val uri = item.uri ?: item.mediaUri ?: return false
-            mainScope.launch {
-                serviceClient.sendRequest(Request.Library.addFavorite(uri))
-            }
-        } else {
-            mainScope.launch {
-                serviceClient.sendRequest(
-                    Request.Library.removeFavorite(item.itemId, item.mediaType),
-                )
-            }
+        if (!mainDataSource.grantedScopes.value.canEditLibrary) return false
+        val state = when {
+            favorite -> true
+            mainDataSource.dislikeSupported.value -> false
+            else -> null
         }
+        if (state != null && item.mediaUri == null) return false
+        mainDataSource.setFavorite(item, state)
         return true
     }
 }

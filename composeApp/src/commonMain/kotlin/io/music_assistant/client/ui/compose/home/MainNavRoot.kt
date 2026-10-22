@@ -66,6 +66,7 @@ import io.music_assistant.client.data.model.client.items.MediaCollection
 import io.music_assistant.client.data.model.client.items.Playlist
 import io.music_assistant.client.data.model.client.items.Podcast
 import io.music_assistant.client.data.model.client.items.RecommendationFolder
+import io.music_assistant.client.data.model.client.items.Track
 import io.music_assistant.client.input.VolumeButtonService
 import io.music_assistant.client.ui.compose.common.ToastDuration
 import io.music_assistant.client.ui.compose.common.ToastHost
@@ -350,6 +351,7 @@ fun MainNavigationRoot(
                     homeScreenState,
                     libraryScreenState,
                     searchScreenState,
+                    goToSettings,
                 )
                 val tabRootKeys = backStacks.map { entryProvider(it.first()).contentKey }
                 ConditionalBackNavDisplay(
@@ -407,6 +409,7 @@ private fun mainNavEntryProvider(
     homeScreenState: MutableState<HomeScreenState?>,
     libraryScreenState: MutableState<LibraryScreenState?>,
     searchScreenState: MutableState<SearchScreenState?>,
+    goToSettings: () -> Unit,
 ): (NavKey) -> NavEntry<NavKey> {
     // Hoisted here (outlives the per-NavEntry SearchViewModel) to carry an empty-quick-search
     // escalation from the library tab to the Search tab. Set by ItemList, consumed by SearchScreen.
@@ -428,6 +431,7 @@ private fun mainNavEntryProvider(
                         is Audiobook,
                         is MediaCollection,
                         is Genre,
+                        is Track,
                             -> {
                             multiBackStack.add(
                                 MainNav.ItemDetails(
@@ -444,6 +448,7 @@ private fun mainNavEntryProvider(
                 providerIconFetcher = providerViewModel.providerIconFetcher(),
                 actionsViewModel = actionsViewModel,
                 state = screenState,
+                onOpenSettings = goToSettings,
             )
         }
 
@@ -504,6 +509,7 @@ private fun mainNavEntryProvider(
                         is Audiobook,
                         is MediaCollection,
                         is Genre,
+                        is Track,
                             -> {
                             multiBackStack.add(
                                 MainNav.ItemDetails(
@@ -551,6 +557,7 @@ private fun mainNavEntryProvider(
                         is Audiobook,
                         is MediaCollection,
                         is Genre,
+                        is Track,
                         -> multiBackStack.add(
                             MainNav.ItemDetails(
                                 itemId = item.itemId,
@@ -586,6 +593,7 @@ private fun mainNavEntryProvider(
                         is Audiobook,
                         is MediaCollection,
                         is Genre,
+                        is Track,
                             -> {
                             multiBackStack.add(
                                 MainNav.ItemDetails(
