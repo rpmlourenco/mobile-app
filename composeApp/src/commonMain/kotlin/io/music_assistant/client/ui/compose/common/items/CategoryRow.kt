@@ -84,6 +84,7 @@ fun <T, U> CategoryRow(
     libraryActions: LibraryActions,
     progressActions: ProgressActions? = null,
     providerIconFetcher: ProviderIconFetcher,
+    viewAllColor: Color = MaterialTheme.colorScheme.primary,
 ) {
     if (data is DataState.Data) {
         CategoryRow(
@@ -97,6 +98,7 @@ fun <T, U> CategoryRow(
             libraryActions = libraryActions,
             progressActions = progressActions,
             providerIconFetcher = providerIconFetcher,
+            viewAllColor = viewAllColor,
         )
     } else if (data is DataState.Loading) {
         val placeholderColor by rememberInfiniteTransition().animateColor(
@@ -136,6 +138,7 @@ fun <T> CategoryRow(
     libraryActions: LibraryActions,
     progressActions: ProgressActions? = null,
     providerIconFetcher: ProviderIconFetcher,
+    viewAllColor: Color = MaterialTheme.colorScheme.primary,
 ) {
     if (itemCategory.items.isEmpty() && itemCategory.filter == null) {
         return
@@ -161,6 +164,7 @@ fun <T> CategoryRow(
                     rowTitle = title,
                     onNavigateToList = onNavigateToList,
                     itemList = itemCategory.list,
+                    color = viewAllColor,
                 )
             }
         },
@@ -276,6 +280,8 @@ fun CategoryRow(
 
                 is PodcastEpisode -> PodcastEpisodeWithMenu(
                     item = item,
+                    navigateToItem = onNavigateClick,
+                    containerItem = containerItem,
                     onPlayOption = onPlayClick,
                     playlistActions = playlistActions,
                     libraryActions = libraryActions,
@@ -383,6 +389,7 @@ private fun ViewAllButton(
     rowTitle: String,
     onNavigateToList: (String, ItemList) -> Unit,
     itemList: ItemList,
+    color: Color,
 ) {
     val viewAllContentDescription = stringResource(Res.string.cd_view_all, rowTitle)
     TextButton(
@@ -393,7 +400,10 @@ private fun ViewAllButton(
             onNavigateToList(rowTitle, itemList)
         },
     ) {
-        Text(stringResource(Res.string.action_view_all))
+        Text(
+            text = stringResource(Res.string.action_view_all),
+            color = color,
+        )
     }
 }
 
@@ -463,7 +473,7 @@ fun PreviewCategoryRowEmpty() {
     CategoryRow(
         title = "Category",
         onNavigateClick = {},
-        onPlayClick = { _, _, _, _ -> },
+        onPlayClick = { _, _ -> },
         mediaItems = emptyList(),
         playlistActions = object : PlaylistActions {
             override suspend fun getEditablePlaylists(): List<Playlist> {
@@ -504,7 +514,7 @@ fun PreviewCategoryLoading() {
             )
         },
         onNavigateClick = {},
-        onPlayClick = { _, _, _, _ -> },
+        onPlayClick = { _, _ -> },
         playlistActions = object : PlaylistActions {
             override suspend fun getEditablePlaylists(): List<Playlist> {
                 TODO("Not yet implemented")
@@ -544,7 +554,7 @@ fun PreviewCategoryNoData() {
             )
         },
         onNavigateClick = {},
-        onPlayClick = { _, _, _, _ -> },
+        onPlayClick = { _, _ -> },
         playlistActions = object : PlaylistActions {
             override suspend fun getEditablePlaylists(): List<Playlist> {
                 TODO("Not yet implemented")

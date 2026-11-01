@@ -14,6 +14,14 @@ upstream's immediate local Pause/Stop and hold/reconnect handling apply.
 Other personal changes retain the screen-on lyrics default, newest-first albums,
 exact displayed-name artist ordering on legacy servers, and the signed fork package.
 
+## Integrated upstream revision
+
+The current fork integrates official `main` at `d4a7256c` (Android 0.17.0).
+The PCM-preservation option is carried into the extracted `sendspin-kmp` module,
+alongside upstream 24-bit audio and format-aware buffer sizing. The fork retains
+immediate Pause/Stop, screen-on lyrics, newest-first albums, legacy artist sorting,
+and the persistent signing key and application ID used by existing installations.
+
 ## Signing setup (once)
 
 Create your own long-lived signing key with JDK 21 `keytool`. Store it outside

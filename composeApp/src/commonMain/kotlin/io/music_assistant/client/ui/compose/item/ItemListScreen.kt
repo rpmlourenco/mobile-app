@@ -43,11 +43,11 @@ fun ItemListScreen(
     clickContext: ClickContext,
 ) {
     val state by itemListViewModel.state.collectAsStateWithLifecycle()
+    val query by itemListViewModel.query.collectAsStateWithLifecycle()
     val viewMode by viewModeViewModel.viewModeFor(mediaType).collectAsStateWithLifecycle()
 
     TopBarLayout(
         topBar = {
-            val query = state.query
             TwoRowTopAppBar(
                 title = {
                     query?.let {
@@ -93,9 +93,7 @@ fun ItemListScreen(
         ItemListContent(
             data = state.items,
             onNavigateClick = onNavigateClick,
-            onPlayClick = { item, option, radio, _ ->
-                actionsViewModel.onPlayClick(item, option, radio)
-            },
+            onPlayClick = actionsViewModel::onPlayClick,
             playlistActions = actionsViewModel,
             libraryActions = actionsViewModel,
             progressActions = actionsViewModel,

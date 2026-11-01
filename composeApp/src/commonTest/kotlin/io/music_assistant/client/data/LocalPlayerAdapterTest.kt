@@ -12,6 +12,7 @@ import io.music_assistant.client.data.model.server.StubServiceClient
 import io.music_assistant.client.settings.SettingsRepository
 import io.music_assistant.client.ui.compose.common.action.PlayerAction
 import io.music_assistant.client.utils.SessionState
+import io.music_assistant.sendspin.api.AudioCodec
 import io.music_assistant.sendspin.api.PlayerEvent
 import io.music_assistant.sendspin.api.PlayerState
 import io.music_assistant.sendspin.api.SendspinPlayer
@@ -28,12 +29,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
+import kotlin.test.fail
 
 /**
  * The adapter against a fake Sendspin player: what a local pause does to the hold,
@@ -47,7 +50,7 @@ class LocalPlayerAdapterTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val tracker = PlayerPositionTracker()
     private val adapter = run {
-        val preferences = UserPreferences()
+        val preferences = UserPreferences(client)
         LocalPlayerAdapter(
             settings = settings,
             apiClient = client,
@@ -67,11 +70,38 @@ class LocalPlayerAdapterTest {
     }
 
     @Test
+    fun aCodecChangeWhilePlayingRestartsTheStreamOnceTheNewConnectionIsActive() = runBlocking<Unit> {
+        playing()
+        settings.setSendspinPlayerSettings(settings.sendspinPlayerSettings.value.copy(codecPreference = AudioCodec.PCM))
+        delay(SETTLE_MS)
+        assertTrue(client.sent.tryReceive().isFailure, "nothing before the new connection")
+
+        // The adapter, and the restart that waits for the new connection.
+        player.emit(PlayerEvent.ServerRefreshNeeded, subscribers = 2)
+
+        assertEquals(PAUSE, client.nextSent().command)
+        assertEquals(PLAY, client.nextSent().command)
+    }
+
+    @Test
+    fun aCodecChangeWhileNotPlayingRestartsNothing() = runBlocking<Unit> {
+        adapter.onInitialPlayersReceived(hasLocalPlayer = false)
+        await { adapter.localPlayerData.value?.player }
+        settings.setSendspinPlayerSettings(settings.sendspinPlayerSettings.value.copy(codecPreference = AudioCodec.PCM))
+        delay(SETTLE_MS)
+
+        player.emit(PlayerEvent.ServerRefreshNeeded)
+        delay(SETTLE_MS)
+
+        assertTrue(client.sent.tryReceive().isFailure)
+    }
+
+    @Test
     fun starvationPausesLikeTheUserAndKeepsTheSessionWanted() = runBlocking<Unit> {
         playing()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
 
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, client.nextSent().command)
         await { player.held.value.takeIf { it } }
         assertFalse(adapter.localPlayerData.value?.player?.isPlaying == true)
         assertTrue(adapter.wantsSession.value)
@@ -81,7 +111,7 @@ class LocalPlayerAdapterTest {
     fun theServerConfirmingThePauseReleasesTheHoldAndTheSession() = runBlocking<Unit> {
         val local = playing()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        client.nextSent()
 
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
 
@@ -107,12 +137,25 @@ class LocalPlayerAdapterTest {
     fun aStreamStartedWhileHeldIsAnsweredWithAnotherPause() = runBlocking<Unit> {
         val local = playing()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        client.nextSent()
 
         player.emit(PlayerEvent.StreamStartedWhileHeld(local.id))
 
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, client.nextSent().command)
         assertTrue(player.held.value)
+    }
+
+    @Test
+    fun aFocusLossWhilePlayingResumesOnFocusRegained() = runBlocking<Unit> {
+        playing()
+        player.emit(PlayerEvent.PlaybackStopped(StopCause.FocusLost))
+        assertEquals(PAUSE, client.nextSent().command)
+
+        player.emit(PlayerEvent.FocusRegained)
+
+        // The play lifts the hold, so a resync pause goes first.
+        assertEquals(PAUSE, client.nextSent().command)
+        assertEquals(PLAY, client.nextSent().command)
     }
 
     @Test
@@ -127,7 +170,7 @@ class LocalPlayerAdapterTest {
         assertTrue(adapter.wantsSession.value)
 
         client.isReadyForCommands.value = true
-        assertEquals(PAUSE, client.sent.receive().command)
+        assertEquals(PAUSE, client.nextSent().command)
         adapter.onServerPlayerUpdate(local.copy(isPlaying = false))
         await { adapter.wantsSession.value.takeUnless { it } }
         assertFalse(adapter.wantsSession.value)
@@ -139,7 +182,7 @@ class LocalPlayerAdapterTest {
 
         adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Stop)
 
-        assertEquals(STOP, client.sent.receive().command)
+        assertEquals(STOP, client.nextSent().command)
         assertTrue(player.held.value)
         assertFalse(adapter.localPlayerData.value?.player?.isPlaying == true)
 
@@ -152,7 +195,7 @@ class LocalPlayerAdapterTest {
     fun clearingTheStateDropsTheSessionWantButKeepsTheHold() = runBlocking<Unit> {
         playing()
         player.emit(PlayerEvent.PlaybackStopped(StopCause.Starved))
-        client.sent.receive()
+        client.nextSent()
 
         adapter.clearState()
 
@@ -166,7 +209,7 @@ class LocalPlayerAdapterTest {
 
         adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Next)
 
-        assertEquals(NEXT, client.sent.receive().command)
+        assertEquals(NEXT, client.nextSent().command)
         assertFalse(tracker.isFrozenUntilConfirmed(QUEUE_ID))
         assertEquals(EPISODE_POSITION_SEC, tracker.effectiveSec(QUEUE_ID))
     }
@@ -177,7 +220,7 @@ class LocalPlayerAdapterTest {
 
         adapter.handleLocalCommand(requireNotNull(adapter.localPlayerData.value), PlayerAction.Next)
 
-        assertEquals(NEXT, client.sent.receive().command)
+        assertEquals(NEXT, client.nextSent().command)
         assertTrue(tracker.isFrozenUntilConfirmed(QUEUE_ID))
         assertEquals(0.0, tracker.effectiveSec(QUEUE_ID))
     }
@@ -231,9 +274,10 @@ class LocalPlayerAdapterTest {
             this.held.value = held
         }
 
-        /** Waits for the adapter's collector first: the flow has no replay. */
-        suspend fun emit(event: PlayerEvent) {
-            _events.subscriptionCount.first { it > 0 }
+        /** Waits for [subscribers] collectors first: the flow has no replay. */
+        suspend fun emit(event: PlayerEvent, subscribers: Int = 1) {
+            withTimeoutOrNull(TIMEOUT_MS) { _events.subscriptionCount.first { it >= subscribers } }
+                ?: fail("$subscribers collectors of the player events not subscribed within $TIMEOUT_MS ms")
             _events.emit(event)
         }
     }
@@ -249,6 +293,9 @@ class LocalPlayerAdapterTest {
             return Result.success(Answer(buildJsonObject {}))
         }
 
+        suspend fun nextSent(): Request =
+            withTimeoutOrNull(TIMEOUT_MS) { sent.receive() } ?: fail("no request sent within $TIMEOUT_MS ms")
+
         override fun requestCommandRecovery() {
             recoveries.value++
         }
@@ -256,6 +303,7 @@ class LocalPlayerAdapterTest {
 
     private companion object {
         val PAUSE = APICommands.playersCmd("pause")
+        val PLAY = APICommands.playersCmd("play")
         val NEXT = APICommands.playersCmd("next")
         val STOP = APICommands.playersCmd("stop")
         const val QUEUE_ID = "queue"

@@ -487,11 +487,39 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
             },
         )
 
+        /**
+         * [fullyPlayed] false lists the episodes the user has not played to the end. Server 2.11
+         * applies it; an older server ignores the argument, so the caller filters the answer too.
+         */
         fun getEpisodes(
             itemId: String,
             providerInstanceIdOrDomain: String,
+            fullyPlayed: Boolean? = null,
+        ) = Request(
+            command = APICommands.MUSIC_PODCASTS_PODCAST_EPISODES,
+            args = buildJsonObject {
+                put("item_id", JsonPrimitive(itemId))
+                put("provider_instance_id_or_domain", JsonPrimitive(providerInstanceIdOrDomain))
+                fullyPlayed?.let { put("fully_played", JsonPrimitive(it)) }
+            },
+        )
+
+        /** One episode by its provider id. */
+        fun getEpisode(
+            itemId: String,
+            providerInstanceIdOrDomain: String,
         ) = Library.subItems(
-            APICommands.MUSIC_PODCASTS_PODCAST_EPISODES,
+            APICommands.MUSIC_PODCASTS_PODCAST_EPISODE,
+            itemId,
+            providerInstanceIdOrDomain,
+        )
+
+        /** The transcript of an episode as a `[text, cues]` tuple. Server 2.11 (`supportsEpisodeTranscript`). */
+        fun getEpisodeTranscript(
+            itemId: String,
+            providerInstanceIdOrDomain: String,
+        ) = Library.subItems(
+            APICommands.MUSIC_PODCASTS_PODCAST_EPISODE_TRANSCRIPT,
             itemId,
             providerInstanceIdOrDomain,
         )
@@ -499,6 +527,9 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
 
     data object Provider {
         fun all() = Request(command = APICommands.PROVIDERS)
+
+        /** The users a playlist can be shared with, the caller included. Server 2.11. */
+        fun shareCandidates() = Request(command = APICommands.CONFIG_PROVIDERS_SHARE_CANDIDATES)
 
         fun icon(providerDomain: String, variant: String? = null) = Request(
             command = APICommands.PROVIDERS_ICON,
@@ -582,6 +613,18 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
             providerInstanceIdOrDomain: String,
         ) = Library.get(APICommands.KIND_GENRES, itemId, providerInstanceIdOrDomain)
 
+        /** The library genres mapped to a library item. The server answers `[]` for any other item. */
+        fun forItem(
+            mediaType: MediaType,
+            itemId: String,
+        ) = Request(
+            command = APICommands.MUSIC_GENRES_FOR_MEDIA_ITEM,
+            args = buildJsonObject {
+                put("media_type", JsonPrimitive(mediaType.serverValue))
+                put("media_id", JsonPrimitive(itemId))
+            },
+        )
+
         fun listLibrary(
             favorite: Boolean? = null,
             search: String? = null,
@@ -591,6 +634,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
             providers: List<String>? = null,
             hideEmpty: Boolean? = null,
             mediaType: String? = null,
+            contentType: String? = null,
         ) = Request(
             command = APICommands.MUSIC_GENRES_LIBRARY_ITEMS,
             args = buildJsonObject {
@@ -602,6 +646,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
                 putListFilters(providers, null)
                 hideEmpty?.let { put("hide_empty", JsonPrimitive(it)) }
                 mediaType?.let { put("media_type", JsonPrimitive(it)) }
+                contentType?.let { put("content_type", JsonPrimitive(it)) }
             },
         )
 
@@ -636,6 +681,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
             albumArtistsOnly: Boolean = false,
             providers: List<String>? = null,
             genres: List<Int>? = null,
+            artistType: String? = null,
         ) = Request(
             command = APICommands.MUSIC_ARTISTS_LIBRARY_ITEMS,
             args = buildJsonObject {
@@ -646,6 +692,30 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
                 putSort(sort)
                 put("album_artists_only", JsonPrimitive(albumArtistsOnly))
                 putListFilters(providers, genres)
+                artistType?.let { put("artist_type", JsonPrimitive(it)) }
+            },
+        )
+
+        /** The `ArtistType` values of the library artists, as server strings. */
+        fun libraryTypes() = Request(command = APICommands.MUSIC_ARTISTS_LIBRARY_ARTIST_TYPES)
+
+        /**
+         * The audiobooks of an author or a narrator. The server reads [artistType] for a provider
+         * artist only; a library artist has its own. Server 2.10 answers the whole list, and 2.11
+         * answers its first page of 500.
+         */
+        fun getAudiobooks(
+            itemId: String,
+            providerInstanceIdOrDomain: String,
+            artistType: String,
+            inLibraryOnly: Boolean = false,
+        ) = Request(
+            command = APICommands.MUSIC_ARTISTS_ARTIST_AUDIOBOOKS,
+            args = buildJsonObject {
+                put("item_id", JsonPrimitive(itemId))
+                put("provider_instance_id_or_domain", JsonPrimitive(providerInstanceIdOrDomain))
+                put("artist_type", JsonPrimitive(artistType))
+                put("in_library_only", JsonPrimitive(inLibraryOnly))
             },
         )
 
@@ -870,6 +940,8 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
             option: QueueOption,
             endlessMixMode: Boolean,
             startItem: String? = null,
+            shuffle: Boolean = false,
+            startFromBeginning: Boolean = false,
         ) = Request(
             command = APICommands.PLAYER_QUEUES_PLAY_MEDIA,
             args = buildJsonObject {
@@ -878,6 +950,10 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
                 put("radio_mode", JsonPrimitive(endlessMixMode))
                 put("queue_id", JsonPrimitive(queueOrPlayerId))
                 startItem?.let { put("start_item", JsonPrimitive(it)) }
+                // Absent flags keep the default of the server: an omitted `shuffle` follows the
+                // queue setting, and a server before the flag ignores an unknown argument anyway.
+                if (shuffle) put("shuffle", JsonPrimitive(true))
+                if (startFromBeginning) put("start_from_beginning", JsonPrimitive(true))
             },
         )
 
@@ -920,6 +996,18 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
             },
         )
 
+        /**
+         * The server loads the item again from its music services, or finds a substitute when
+         * none of them has it any more. Answers the refreshed item. Needs `library.manage` before
+         * server 2.11 and `library.write` from 2.11.
+         */
+        fun refreshItem(itemUri: String) = Request(
+            command = APICommands.MUSIC_REFRESH_ITEM,
+            args = buildJsonObject {
+                put("media_item", JsonPrimitive(itemUri))
+            },
+        )
+
         fun markPlayed(
             item: MarkableItem,
         ) = Request(
@@ -943,6 +1031,8 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
             mediaTypes: List<MediaType>,
             limit: Int = 20,
             libraryOnly: Boolean,
+            // From server 2.10.0 (`supportsSearchSources`): "library" and provider ids. Null searches all.
+            providers: List<String>? = null,
         ) = Request(
             command = APICommands.MUSIC_SEARCH,
             args = buildJsonObject {
@@ -953,6 +1043,7 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
                 )
                 put("limit", JsonPrimitive(limit))
                 put("library_only", JsonPrimitive(libraryOnly))
+                providers?.let { put("providers", JsonArray(it.map(::JsonPrimitive))) }
             },
         )
 
@@ -989,6 +1080,14 @@ data class Request @OptIn(ExperimentalUuidApi::class) constructor(
 
     data object Auth {
         fun providers() = Request(command = APICommands.AUTH_PROVIDERS)
+
+        fun me() = Request(command = APICommands.AUTH_ME)
+
+        /** Replaces ALL preferences of the signed-in user with [preferences]. */
+        fun updatePreferences(preferences: JsonObject) = Request(
+            command = APICommands.AUTH_USER_UPDATE,
+            args = buildJsonObject { put("preferences", preferences) },
+        )
 
         /** A [codeChallenge] makes the browser return to the app, which then sends [exchange]. */
         fun authorizationUrl(
