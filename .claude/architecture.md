@@ -231,9 +231,14 @@ actual class PlatformFeature {
 - **AI Radio**: The client supports server schema 88 and higher only (`supportsAiRadio`). Both gates,
   `MainDataSource.aiRadioAvailable` and `aiRadioQueueDjAvailable`, need it. A station is a finite
   Radio item (`ai_radio://radio/<station_id>`, `ServerAiRadioStation.uri`). Play it through
-  `PlayDispatcher` like any radio. There is no start, stop or status command. The server also mirrors
-  each show into the library as a Radio row. The Radio lists hide these rows (`isAiRadioShow`),
-  because the AI Radio section lists them. The `ai_radio` plugin
+  `PlayDispatcher` like any radio. There is no start, stop or status command. A station with
+  `is_endless` false and `is_dynamic` false has a fixed tracklist
+  (`RadioStation.hasFiniteTracklist`). The radio page loads it with
+  `music/radios/radio_tracks` into the Tracks tab.
+  An endless or dynamic station gets no Tracks tab. A missing `is_endless` means
+  true. The Versions tab loads `music/radios/radio_versions`. The server also
+  mirrors each show into the library as a Radio row. The Radio lists hide these
+  rows (`isAiRadioShow`), because the AI Radio section lists them. The `ai_radio` plugin
   sends `provider_event` refetch hints (`object_id` `ai_radio`). The hints have no state, so re-read
   the endpoint that the hint names. `AiRadioRepository.changes` maps the hints to `AiRadioChange`.
   It also sends `RESYNC` when the command session comes back, because the server does not send
@@ -267,6 +272,30 @@ actual class PlatformFeature {
 - Use `remember`/`derivedStateOf` for computed values
 - Split large composables into smaller files by meaning
 - Previews only when explicitly requested
+- **Device chrome**: `DeviceChrome` (`ui-utils`) is the window geometry that the platform reports. It holds the area
+  of the system vertical bar, the hinge of a book-style foldable and the fold. Read it from `LocalDeviceChrome`, which
+  `App` provides. Only iOS gives a value, from iOS 27.1 (iPhone Duo). The probe in `ContentView.swift` reads it from
+  UIKit and writes it through `DeviceChromeBridge`, and `MainViewController` gives it to `App`. UIKit sends no
+  notification when the reserved regions change. So the probe reads them after a layout pass, a safe area change, a
+  hinge update or a scene change. It also reads them when the vertical bar edge trait changes. After a signal it reads
+  them 4 times a second for 2 s, and each new signal makes this time longer. After the app starts and after a return
+  to the foreground, it reads them for up to 10 s. A read while the scene still reports the background state can end
+  this time early. Then the 2 s after the scene activation apply. A signal can be missed. So a window that had a hinge
+  region or a vertical bar also gets a backup read. Its nominal interval is 2 s. The real delay also depends on the
+  timer tolerance (0.5 s) and on the main thread. A later read without a hinge or a bar does not stop the backup read.
+  The probe reads only while the scene is in the foreground, and once when the scene starts to enter the foreground.
+  In one test series on iPhone Duo (iOS 27.1), the hinge sent updates during each movement. The series did not show
+  if the hinge can miss an update. On other devices each value is null and the layouts do not change. A test gives a
+  value with `App(deviceChrome = …)` or `LocalDeviceChrome`.
+- **Stacked rows**: `CategoryRow` (`ui/compose/common/items/`) shows a row of tap-to-play items as list items, two
+  in each column. The other rows show one row of grid tiles. A tap-to-play item is a track, a podcast episode or a
+  radio station (`playsOnTap`). An audiobook is not a tap-to-play item, because its tile opens the item page. The
+  stacked items are the `ViewMode.LIST` items (`RowItem`) with one title line (`titleMaxLines`), so both items of a
+  column have the same height. A column is 70% of the row width, and 360 dp at most. Each stacked item has a card
+  background: `surfaceVariant` at 30% alpha, with the shape of the `RowItem` ripple.
+
+  The placeholders that show while a row loads are always grid tiles. So a stacked row gets shorter when its items
+  load, and the rows below it move up. This is a known limit.
 
 ## State Management
 
