@@ -24,7 +24,46 @@ Root: CPListTemplate ("Library")
     └── RecommendationFolders with artwork thumbnails (up to 8 per folder)
 ```
 
-User taps an item → `CarPlayContentManager.playItem()` → `KmpHelper.playMediaItem()` → `CPNowPlayingTemplate.shared` is pushed → `NowPlayingManager` updates `MPNowPlayingInfoCenter` for artwork/metadata/remote commands.
+User taps an item → `CarPlayContentManager.playItem()` → `KmpHelper.playMediaItem()` → `CPNowPlayingTemplate.shared` is pushed → `NowPlayingCoordinator` updates `MPNowPlayingInfoCenter` for artwork/metadata/remote commands.
+
+### Like button
+
+The Now Playing template shows a heart button (#1347). It follows the rules of the Android Auto
+favorite action (`MediaNotificationData`, `SharedMediaSessionManager`):
+
+| Current item | Heart | Tap |
+|---|---|---|
+| A liked track | Filled | Clears the like (`toggleFavorite` sends null, never a dislike). |
+| A track with no choice, or a disliked track (server 2.11) | Outline | Likes the track. |
+| A radio stream with a song on air that the server can resolve | Outline | Adds the song on air (`favoriteCurrentlyPlaying`). |
+| Audiobook, podcast episode, a track without a URI, nothing playing | No button | — |
+
+- The user must have `library.write` (`GrantedScopes.canEditLibrary`). Without it, there is no button.
+- `MainDataSource.nowPlayingLike` (`NowPlayingLike`, from `buildNowPlayingLike`) is the state of the
+  local player. It includes the optimistic favorite override, so the heart changes at once.
+- `KmpHelper.toggleNowPlayingLike` calls `MainDataSource.toggleNowPlayingLike`. It reads the state
+  again from the current local player, so the action always applies to the item that plays now.
+- The scene delegate keeps two heart instances for each connection, `heart` and `heart.fill`. A state
+  change installs the other instance, and it never makes a new one. The heart sits between shuffle and
+  repeat, as in Android Auto. A radio stream shows the heart alone.
+- A favorite is not a player action, so the tap does not go through `dispatchCarCommand`.
+
+### Up Next
+
+The Now Playing template shows the system Up Next button, titled "Queue" (`CarPlayStrings.queue`).
+The button opens a `CPListTemplate` with the queue of the local player.
+
+- `KmpHelper.observeCarPlayQueue` gives the rows from the current item on. It uses the same rows as
+  the in-app queue and Android Auto (`buildDisplayRows`, then `upNext`), so the chapters of a current
+  audiobook follow the book. The limit is `CPListTemplate.maximumItemCount`. Older items do not show.
+- The subscription starts on connect and stops on disconnect. It enables the button only if the list
+  has more than one row, because the current item alone is not an Up Next list.
+- The subscription fires only when a row changes. While the list is on screen, each change rebuilds
+  its sections. The current item shows the playing indicator.
+- A tap sends the row key to `KmpHelper.playCarPlayQueueRow`. A queue item plays, and a chapter row
+  seeks in the current book (`MainDataSource.selectQueueRow`, shared with Android Auto). Then the
+  stack pops back to Now Playing.
+- The list has no reorder and no remove, because CarPlay list rows have no such actions.
 
 ### Template constraints (iOS 18+)
 
@@ -36,9 +75,12 @@ User taps an item → `CarPlayContentManager.playItem()` → `KmpHelper.playMedi
 ### Browse icons
 
 `CPGridTemplate` with SF Symbols, adaptive theming via `UIImageAsset`:
-- Dark: background `#404378` (primaryContainer), icon tint `#C0C1FF` (primary)
-- Light: background `#E0DEFF`, icon tint `#575992`
-- Icons centered, scaled to 80% of available space.
+- The icon tint is the `primary` role of the accent color setting (see the Accent color bullet in
+  `.claude/architecture.md`). `KmpHelper.carPlayAccent()` gives it as ARGB for the light and the dark
+  appearance. The wallpaper accent has no iOS scheme, so it gives the default blue.
+- The scene delegate reads the tint once in `didConnect`, before it builds a template. A CPListItem
+  image is immutable, so an accent change on the phone reaches CarPlay at the next connect.
+- The icons have no background. They are centered and scaled to 80% of the available space.
 
 ### Artwork loading
 
@@ -61,9 +103,9 @@ The app conforms to three media-domain intents via a single class (`SiriIntentHa
 | `INUpdateMediaAffinityIntent` | "I love/like/dislike this song" | Resolve from prior donations or search → `KmpHelper.setFavorite`. Like ⇒ add. Dislike ⇒ dislike from server 2.11, remove below it. |
 | `INSearchForMediaIntent` | "search for X in Music Assistant" | Resolve only — surface results, don't play. Follow-up "play that" routes through `INPlayMediaIntent`. |
 
-**Voice transport commands bypass `SiriIntentHandler` entirely.** "Hey Siri, skip this," "next track," "pause," and the steering-wheel buttons all flow through `MPRemoteCommand` (`nextTrackCommand`, `pauseCommand`, etc.), dispatched by `mediaremoted` from `com.apple.AssistantServices`. Those land in `NowPlayingManager.setupRemoteCommands()` and route to `NativeAudioController`'s `RemoteCommandHandler`, never hitting any of the three intents above. Confirmed empirically: a "Hey Siri, skip to next track" during in-car testing produced a `mediaremoted` log line `Received command from <com.apple.assistant_service>: NextTrack` with no `INPlayMediaIntent` activity at all.
+**Voice transport commands bypass `SiriIntentHandler` entirely.** "Hey Siri, skip this," "next track," "pause," and the steering-wheel buttons all flow through `MPRemoteCommand` (`nextTrackCommand`, `pauseCommand`, etc.), dispatched by `mediaremoted` from `com.apple.AssistantServices`. Those land in `NowPlayingCoordinator.setupRemoteCommands()` and route to `NativeAudioController`'s `RemoteCommandHandler`, never hitting any of the three intents above. Confirmed empirically: a "Hey Siri, skip to next track" during in-car testing produced a `mediaremoted` log line `Received command from <com.apple.assistant_service>: NextTrack` with no `INPlayMediaIntent` activity at all.
 
-Practical consequence when triaging "Hey Siri did the wrong thing" reports: classify by *what* was said. Content phrases ("play X", "search for Y", "I love this") → `SiriIntentHandler`. Transport phrases ("next", "previous", "pause", "skip") → `NowPlayingManager` / `NativeAudioController`. The two paths share no code; diagnosing the wrong one wastes time.
+Practical consequence when triaging "Hey Siri did the wrong thing" reports: classify by *what* was said. Content phrases ("play X", "search for Y", "I love this") → `SiriIntentHandler`. Transport phrases ("next", "previous", "pause", "skip") → `NowPlayingCoordinator` / `NativeAudioController`. The two paths share no code; diagnosing the wrong one wastes time.
 
 **Diagnostic flow** when Siri claims the app doesn't support media:
 ```
@@ -159,7 +201,7 @@ Returns `Boolean` synchronously: `true` if the request was dispatched, `false` i
 | `iosApp/iosApp/CarPlay/CarPlayContentManager.swift` | Data fetching bridge, maps `AppMediaItem` → `CPListItem`, image loading, donates plays. |
 | `iosApp/iosApp/CarPlay/SiriIntentHandler.swift` | All three media-domain intents (`INPlayMediaIntentHandling`, `INUpdateMediaAffinityIntentHandling`, `INSearchForMediaIntentHandling`). Static `NSCache<NSString, AppMediaItem>` (100 items). Exposes `static donatePlayed(_:)`. |
 | `iosApp/iosApp/iOSApp.swift` | `AppDelegate` for CarPlay scene routing + Siri intent routing (`application(_:handlerFor:)`). Calls `bootstrapKmp()` from `iOSApp.init()` before any scene connects. Owns `KmpState.isReady`. |
-| `iosApp/iosApp/NowPlayingManager.swift` | Control Center / lock screen / Now Playing artwork via `MPNowPlayingInfoCenter`. |
+| `iosApp/NowPlayingCoordinator.swift` | Control Center / lock screen / Now Playing artwork via `MPNowPlayingInfoCenter`. |
 | `iosApp/iosApp/Info.plist` | Scene config + the SiriKit `INIntentsSupported` / `INSupportedMediaCategories` / `NSUserActivityTypes` keys. |
 | `iosApp/iosApp/CarPlay.entitlements` | `com.apple.developer.carplay-audio`. |
 | `composeApp/src/iosMain/.../KmpHelper.kt` | iOS-only KMP bridge: fetch, search, play, setFavorite, getServerId, getServerUrl. |
@@ -173,12 +215,17 @@ iOS-only Swift-callable API in `KmpHelper.kt`:
 |---|---|
 | `fetchArtists / Albums / Tracks / Playlists / Audiobooks / Podcasts / RadioStations` | `Request.<Type>.listLibrary()` |
 | `fetchRecommendations` | `Request.Library.recommendations()` |
-| `fetchRecommendationFolders` | Same, filtered to `AppMediaItem.RecommendationFolder` |
+| `fetchRecommendationFolders` | Same, filtered to `AppMediaItem.RecommendationFolder`, then to the visible rows in the order of the Discover config (`visibleHomeFolders`, like Android Auto) |
 | `search(query)` | 6 media types (artist/album/track/playlist/audiobook/radio), `limit=10`, `libraryOnly=false` |
 | `playMediaItem(item)` | Selected player + `QueueOption.PLAY` |
 | `setFavorite(item, favorite) -> Boolean` | `addFavorite(uri\|mediaUri)` or `removeFavorite(id, mediaType)`. False if no URI for add. |
 | `getServerUrl() -> String?` | The connected server's base URL |
 | `getServerId() -> String?` | The connected server's stable UUID (from `ServerInfo.server_id` in the handshake) |
+| `carPlayAccent() -> CarPlayAccent` | The accent primary as ARGB (`lightArgb`, `darkArgb`) for the browse icon tint |
+| `observeNowPlayingLike(onChanged) -> Cancellable` | The like button state of the current item (`NowPlayingLike`) |
+| `toggleNowPlayingLike()` | A tap on the like button |
+| `observeCarPlayQueue(limit, onChanged) -> Cancellable` | The Up Next rows of the local player (`CarPlayQueueRow.Item` or `.Chapter`) |
+| `playCarPlayQueueRow(key) -> Boolean` | Plays the queue item or seeks to the chapter. False if the row is gone |
 
 All completion handlers fire on `Dispatchers.Main` (= iOS main thread on Kotlin/Native).
 
@@ -225,6 +272,8 @@ Common failure modes:
 |---|---|
 | CarPlay browse + play (simulator) | ✅ |
 | CarPlay browse + play (in-car) | Untested |
+| CarPlay like button (#1347) | Compiled and unit-tested only. Not checked in the simulator or in a car |
+| CarPlay Up Next (#986) | Compiled and unit-tested only. Not checked in the simulator or in a car |
 | `INPlayMediaIntent` from "Hey Siri" on iPhone | ✅ verified for tracks, albums, artists |
 | `INUpdateMediaAffinityIntent` ("I love this song") | ⚠️ Server-side favorite applies correctly. Siri's own NLG fails with `SiriAudioAffinityScorer Got unexpected parse` because Siri can't ground the spoken confirmation against an unknown item — renders "something went wrong" UI. **Blocked on Spotlight indexing.** |
 | `INSearchForMediaIntent` | Untested |

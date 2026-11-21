@@ -31,8 +31,9 @@ import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.IconToggleButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.SheetValue
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -53,6 +54,7 @@ import androidx.compose.ui.unit.sp
 import io.music_assistant.client.data.model.client.LrcLine
 import io.music_assistant.client.data.model.client.Lyrics
 import io.music_assistant.client.ui.compose.common.ToastHost
+import io.music_assistant.client.ui.compose.common.boundedModalSheet
 import io.music_assistant.client.ui.compose.common.rememberToastState
 import io.music_assistant.client.ui.inactive
 import io.music_assistant.client.utils.KeepScreenOn
@@ -93,8 +95,12 @@ fun LyricsSheet(
     kind: LyricsSheetKind = LyricsSheetKind.LYRICS,
 ) {
     ModalBottomSheet(
+        modifier = Modifier.boundedModalSheet(),
         onDismissRequest = onDismiss,
-        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+        sheetState = rememberBottomSheetState(
+            initialValue = SheetValue.Hidden,
+            enabledValues = setOf(SheetValue.Hidden, SheetValue.Expanded),
+        ),
         dragHandle = null,
         containerColor = MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.95f),
         // Content fills to the edge; the nav-bar/safe-area inset would otherwise show as an
@@ -345,6 +351,7 @@ private fun SyncedLyrics(
                 Text(
                     text = line.text,
                     fontSize = 28.sp,
+                    lineHeight = 36.sp,
                     fontWeight = FontWeight.Bold,
                     color = Color.Transparent,
                     modifier = Modifier.fillMaxWidth().clearAndSetSemantics {},
@@ -352,6 +359,7 @@ private fun SyncedLyrics(
                 Text(
                     text = line.text,
                     fontSize = 28.sp,
+                    lineHeight = 36.sp,
                     fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
                     color = if (active) {
                         MaterialTheme.colorScheme.onSurface

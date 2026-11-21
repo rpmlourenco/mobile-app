@@ -4,6 +4,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -13,6 +14,8 @@ import io.music_assistant.client.data.model.client.byId
 import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.PodcastEpisode
 import io.music_assistant.client.data.model.client.items.Track
+import io.music_assistant.client.data.model.client.sleepTimerEndMode
+import io.music_assistant.client.data.model.client.sleepTimerEndModes
 import io.music_assistant.client.data.repository.QueueOverlayRepository
 import io.music_assistant.client.ui.compose.common.action.PlayerAction
 import io.music_assistant.client.ui.compose.common.items.AddToPlaylistDialog
@@ -20,6 +23,7 @@ import io.music_assistant.client.ui.compose.common.items.ChooseArtistDialog
 import io.music_assistant.client.ui.compose.common.items.PlaylistActions
 import io.music_assistant.client.ui.compose.home.HomeScreenViewModel
 import io.music_assistant.client.ui.compose.home.players.announcement.AnnouncementDialog
+import io.music_assistant.client.ui.compose.home.players.share.DeviceAudioShareDialog
 import io.music_assistant.client.ui.compose.provider.ProviderViewModel
 import io.music_assistant.client.ui.utils.DeviceChrome
 import kotlinx.coroutines.flow.Flow
@@ -61,7 +65,15 @@ fun PlayerDialogHost(
 
         is PlayerDialogRequest.SleepTimer -> SleepTimerDialog(
             expiresAtSec = player.player.sleepTimerExpiresAt,
+            endMode = player.player.sleepTimerEndMode,
+            endModes = if (homeScreenViewModel.sleepTimerModesSupported.collectAsStateWithLifecycle().value) {
+                player.sleepTimerEndModes()
+            } else {
+                emptyList()
+            },
+            currentItem = player.queueInfo?.currentItem?.track,
             onSelect = { homeScreenViewModel.setSleepTimer(request.playerId, it) },
+            onSelectEnd = { homeScreenViewModel.setSleepTimer(request.playerId, it) },
             onClear = { homeScreenViewModel.clearSleepTimer(request.playerId) },
             onDismissRequest = onDismiss,
         )
@@ -107,6 +119,11 @@ fun PlayerDialogHost(
         }
 
         is PlayerDialogRequest.Announcement -> AnnouncementDialog(
+            player = player,
+            onDismissRequest = onDismiss,
+        )
+
+        is PlayerDialogRequest.DeviceAudio -> DeviceAudioShareDialog(
             player = player,
             onDismissRequest = onDismiss,
         )
@@ -165,7 +182,11 @@ private fun ResolvedLyrics(
 ) {
     val item = player.queueInfo?.currentItem?.track
     val lyrics = when (item) {
-        is Track -> item.lyrics
+        is Track -> key(item.provider, item.itemId, item.lyrics) {
+            remember { homeScreenViewModel.trackLyrics(item) }
+                .collectAsStateWithLifecycle().value.dataOrNull
+        }
+
         is PodcastEpisode -> remember(item.provider, item.itemId) { homeScreenViewModel.transcript(item) }
             .collectAsStateWithLifecycle().value.dataOrNull
 

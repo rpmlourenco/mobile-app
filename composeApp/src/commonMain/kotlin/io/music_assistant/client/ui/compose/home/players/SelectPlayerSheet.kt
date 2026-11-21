@@ -4,15 +4,22 @@
 package io.music_assistant.client.ui.compose.home.players
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -57,23 +64,25 @@ import androidx.compose.ui.unit.dp
 import compose.icons.TablerIcons
 import compose.icons.tablericons.GripVertical
 import io.music_assistant.client.data.model.client.PlayerData
+import io.music_assistant.client.data.model.client.PlayerDelay
 import io.music_assistant.client.data.model.client.byId
-import io.music_assistant.client.sharedicons.SharedIcons
 import io.music_assistant.client.ui.alphaOn
 import io.music_assistant.client.ui.compose.common.OverflowMenuButton
 import io.music_assistant.client.ui.compose.common.OverflowMenuOption
 import io.music_assistant.client.ui.compose.common.action.PlayerAction
+import io.music_assistant.client.ui.compose.common.boundedModalSheet
 import io.music_assistant.client.ui.compose.common.icons.NowPlayingIcon
+import io.music_assistant.client.ui.utils.SnapToHeightLayout
 import musicassistantclient.composeapp.generated.resources.Res
 import musicassistantclient.composeapp.generated.resources.cd_close
 import musicassistantclient.composeapp.generated.resources.cd_more
 import musicassistantclient.composeapp.generated.resources.player_unavailable
 import musicassistantclient.composeapp.generated.resources.players_group_settings
 import musicassistantclient.composeapp.generated.resources.players_hide_unavailable
+import musicassistantclient.composeapp.generated.resources.players_nothing
 import musicassistantclient.composeapp.generated.resources.players_title
 import org.jetbrains.compose.resources.painterResource
 import org.jetbrains.compose.resources.stringResource
-import org.jetbrains.compose.resources.vectorResource
 import sh.calvin.reorderable.ReorderableItem
 import sh.calvin.reorderable.rememberReorderableLazyListState
 
@@ -88,6 +97,15 @@ private object SheetStaysOnContentScroll : NestedScrollConnection {
     override suspend fun onPostFling(consumed: Velocity, available: Velocity) = available
 }
 
+/** What the player sheet shows when it opens. */
+sealed interface PlayerSheetStart {
+    /** The list of players. */
+    data object Players : PlayerSheetStart
+
+    /** The group settings of one player. */
+    data class Group(val playerId: String) : PlayerSheetStart
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SelectPlayerSheet(
@@ -97,10 +115,15 @@ fun SelectPlayerSheet(
     onMoveToPlayer: (String) -> Unit = {},
     onReorder: (List<String>) -> Unit = {},
     onPlayerAction: (String, PlayerAction) -> Unit = { _, _ -> },
+    // The main transport button of a row, sent like the player's own button.
+    onTransportAction: (PlayerData, PlayerAction) -> Unit = { _, _ -> },
     hideUnavailable: Boolean = false,
     onToggleHideUnavailable: () -> Unit = {},
-    onAdjustPlaybackDelay: (Int) -> Unit = {},
+    playerDelays: Map<String, PlayerDelay> = emptyMap(),
+    onLoadPlayerDelays: (Collection<String>) -> Unit = {},
+    onAdjustPlayerDelay: (String, Int) -> Unit = { _, _ -> },
     canLeaveGroup: Boolean = false,
+    start: PlayerSheetStart = PlayerSheetStart.Players,
 ) {
     val sheetState = rememberBottomSheetState(
         initialValue = SheetValue.Hidden,
@@ -108,33 +131,41 @@ fun SelectPlayerSheet(
     )
 
     ModalBottomSheet(
+        modifier = Modifier.boundedModalSheet(),
         sheetState = sheetState,
         onDismissRequest = onDismissRequest,
-        dragHandle = { SheetHandle(onClose = onDismissRequest) },
+        // The lists draw behind the bottom inset and pad their end instead (sheetListPadding),
+        // so the last row does not stop above an empty band.
+        contentWindowInsets = { BottomSheetDefaults.modalWindowInsets.only(WindowInsetsSides.Top) },
     ) {
-        var showGroupSettings by remember { mutableStateOf<String?>(null) }
-        val groupPlayer = showGroupSettings?.let { players.byId(it) }
+        SnapToHeightLayout(thresholdRatio = 0.6) {
+            var showGroupSettings by remember { mutableStateOf((start as? PlayerSheetStart.Group)?.playerId) }
+            val groupPlayer = showGroupSettings?.let { players.byId(it) }
 
-        if (groupPlayer != null) {
-            GroupLayout(
-                player = groupPlayer,
-                players = players,
-                onDismissRequest = onDismissRequest,
-                onPlayerAction = onPlayerAction,
-                onAdjustPlaybackDelay = onAdjustPlaybackDelay,
-                canLeaveGroup = canLeaveGroup,
-            )
-        } else {
-            PlayerLayout(
-                players = players,
-                selectedPlayer = selectedPlayer,
-                onDismissRequest = onDismissRequest,
-                onMoveToPlayer = onMoveToPlayer,
-                onReorder = onReorder,
-                onGroupRequest = { player -> showGroupSettings = player.playerId },
-                hideUnavailable = hideUnavailable,
-                onToggleHideUnavailable = onToggleHideUnavailable,
-            )
+            if (groupPlayer != null) {
+                GroupLayout(
+                    player = groupPlayer,
+                    players = players,
+                    onDismissRequest = onDismissRequest,
+                    onPlayerAction = onPlayerAction,
+                    playerDelays = playerDelays,
+                    onLoadPlayerDelays = onLoadPlayerDelays,
+                    onAdjustPlayerDelay = onAdjustPlayerDelay,
+                    canLeaveGroup = canLeaveGroup,
+                )
+            } else {
+                PlayerLayout(
+                    players = players,
+                    selectedPlayer = selectedPlayer,
+                    onDismissRequest = onDismissRequest,
+                    onMoveToPlayer = onMoveToPlayer,
+                    onReorder = onReorder,
+                    onGroupRequest = { player -> showGroupSettings = player.playerId },
+                    onTransportAction = onTransportAction,
+                    hideUnavailable = hideUnavailable,
+                    onToggleHideUnavailable = onToggleHideUnavailable,
+                )
+            }
         }
     }
 }
@@ -147,20 +178,12 @@ private fun PlayerLayout(
     onMoveToPlayer: (String) -> Unit,
     onReorder: (List<String>) -> Unit,
     onGroupRequest: (PlayerData) -> Unit,
+    onTransportAction: (PlayerData, PlayerAction) -> Unit,
     hideUnavailable: Boolean,
     onToggleHideUnavailable: () -> Unit,
 ) {
-    Column(modifier = Modifier.fillMaxHeight()) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(start = 16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-        ) {
-            Text(
-                stringResource(Res.string.players_title),
-                style = MaterialTheme.typography.titleMedium,
-            )
-
+    Column {
+        SheetHeader(title = stringResource(Res.string.players_title), onClose = onDismissRequest) {
             OverflowMenuButton(
                 options = listOf(
                     OverflowMenuOption(
@@ -192,8 +215,9 @@ private fun PlayerLayout(
             }
         }
 
-        Box(modifier = Modifier.padding(16.dp).nestedScroll(SheetStaysOnContentScroll)) {
+        Box(modifier = Modifier.sheetListPadding().nestedScroll(SheetStaysOnContentScroll)) {
             PlayerSelection(
+                contentPadding = sheetListContentPadding(),
                 players = shownPlayers,
                 selectedPlayer = selectedPlayer,
                 onDismissRequest = onDismissRequest,
@@ -208,6 +232,7 @@ private fun PlayerLayout(
                     )
                 },
                 onGroupRequest = onGroupRequest,
+                onTransportAction = onTransportAction,
             )
         }
     }
@@ -219,36 +244,57 @@ private fun GroupLayout(
     players: List<PlayerData>,
     onDismissRequest: () -> Unit,
     onPlayerAction: (String, PlayerAction) -> Unit,
-    onAdjustPlaybackDelay: (Int) -> Unit,
+    playerDelays: Map<String, PlayerDelay>,
+    onLoadPlayerDelays: (Collection<String>) -> Unit,
+    onAdjustPlayerDelay: (String, Int) -> Unit,
     canLeaveGroup: Boolean,
 ) {
-    Column(modifier = Modifier.fillMaxHeight()) {
-        Text(
-            text = stringResource(Res.string.players_group_settings),
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(start = 16.dp),
-        )
+    // The pivot and the bound members show controls, so their delays load; a new member loads on join.
+    val memberIds = remember(player.playerId, player.childrenBinds) {
+        listOf(player.playerId) + player.childrenBinds.filter { it.isBound }.map { it.id }
+    }
+    LaunchedEffect(memberIds) { onLoadPlayerDelays(memberIds) }
+    Column {
+        SheetHeader(title = stringResource(Res.string.players_group_settings), onClose = onDismissRequest)
 
-        Box(modifier = Modifier.padding(16.dp).nestedScroll(SheetStaysOnContentScroll)) {
+        Box(modifier = Modifier.sheetListPadding().nestedScroll(SheetStaysOnContentScroll)) {
             GroupSettings(
+                contentPadding = sheetListContentPadding(),
                 player = player,
                 onDismiss = onDismissRequest,
                 playerAction = onPlayerAction,
                 localPlayerId = players.firstOrNull { it.isLocal }?.playerId,
-                onAdjustPlaybackDelay = onAdjustPlaybackDelay,
+                playerDelays = playerDelays,
+                onAdjustPlayerDelay = onAdjustPlayerDelay,
                 canLeaveGroup = canLeaveGroup,
             )
         }
     }
 }
 
-/** The drag handle of the sheet, with the close button at its end. */
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * The title row of the sheet: the title, the [actions], then the close button. The close button
+ * shares the row with the actions, so their touch targets sit side by side and never stack.
+ */
 @Composable
-private fun SheetHandle(onClose: () -> Unit) {
-    Box(modifier = Modifier.fillMaxWidth()) {
-        BottomSheetDefaults.DragHandle(modifier = Modifier.align(Alignment.Center))
-        IconButton(onClick = onClose, modifier = Modifier.align(Alignment.CenterEnd)) {
+private fun SheetHeader(
+    title: String,
+    onClose: () -> Unit,
+    actions: @Composable RowScope.() -> Unit = {},
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = title,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.titleMedium,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        actions()
+        IconButton(onClick = onClose) {
             Icon(
                 imageVector = Icons.Default.Close,
                 contentDescription = stringResource(Res.string.cd_close),
@@ -257,14 +303,26 @@ private fun SheetHandle(onClose: () -> Unit) {
     }
 }
 
+/** The list box of the sheet: no bottom padding, so the list scrolls to the sheet edge. */
+private fun Modifier.sheetListPadding() = padding(start = 16.dp, top = 16.dp, end = 16.dp)
+
+/** The list end padding: the bottom safe area, plus the gap the box no longer adds. */
+@Composable
+private fun sheetListContentPadding() = PaddingValues(
+    bottom = WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom).asPaddingValues().calculateBottomPadding() +
+        16.dp,
+)
+
 @Composable
 private fun PlayerSelection(
+    contentPadding: PaddingValues,
     players: List<PlayerData>,
     selectedPlayer: PlayerData,
     onDismissRequest: () -> Unit,
     onSelectPlayer: (String) -> Unit,
     onReorder: (reordered: List<String>, movedId: String) -> Unit,
     onGroupRequest: (PlayerData) -> Unit,
+    onTransportAction: (PlayerData, PlayerAction) -> Unit,
 ) {
     val plateShape = RoundedCornerShape(12.dp)
 
@@ -301,6 +359,7 @@ private fun PlayerSelection(
             .testTag("PlayersList")
             .selectableGroup(),
         state = listState,
+        contentPadding = contentPadding,
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(
@@ -357,16 +416,27 @@ private fun PlayerSelection(
                         contentDescription = null,
                     )
 
-                    Text(
-                        text = item.player.name,
+                    Column(
                         modifier = Modifier
                             .padding(start = 8.dp)
                             .weight(1f)
                             .alphaOn(!dormant),
-                        style = MaterialTheme.typography.bodyLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    ) {
+                        Text(
+                            text = item.player.name,
+                            style = MaterialTheme.typography.bodyLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                        // Never blank, so the marquee always has text to scroll.
+                        Text(
+                            text = item.player.currentMedia?.title?.takeUnless { it.isBlank() }
+                                ?: stringResource(Res.string.players_nothing),
+                            modifier = Modifier.basicMarquee().alpha(0.6f),
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 1,
+                        )
+                    }
 
                     if (item.player.isPlaying || item.player.isAnnouncing) {
                         NowPlayingIcon(
@@ -380,16 +450,17 @@ private fun PlayerSelection(
                         )
                     }
 
-                    if (!item.isLocal) {
-                        item.groupBadge()?.let {
-                            GroupCountBadge(it, modifier = Modifier.padding(start = 8.dp))
-                        }
-                        IconButton(onClick = { onGroupRequest(item) }) {
+                    item.mainTransport().takeIf { it.enabled }?.let { main ->
+                        IconButton(onClick = { onTransportAction(item, main.action) }) {
                             Icon(
-                                vectorResource(SharedIcons.getResource(SharedIcons.SPEAKER)),
-                                contentDescription = null,
+                                imageVector = main.button.icon,
+                                contentDescription = stringResource(main.button.label),
                             )
                         }
+                    }
+
+                    if (item.offersGrouping) {
+                        GroupButton(player = item, onClick = { onGroupRequest(item) })
                     }
 
                     if (!item.player.isSelectable) {
@@ -401,26 +472,31 @@ private fun PlayerSelection(
                         )
                     }
 
-                    if (!item.isLocal) {
-                        Icon(
-                            modifier = Modifier
-                                .padding(start = 8.dp)
-                                .draggableHandle(
-                                    onDragStopped = {
-                                        dragEndIndex?.let {
-                                            onReorder(
-                                                internalPlayers.map { p -> p.player.id },
-                                                item.player.id,
-                                            )
-                                        }
-                                    },
-                                )
-                                .size(16.dp),
-                            imageVector = TablerIcons.GripVertical,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.secondary,
+                    // The local player is pinned first, so its handle is invisible and inert;
+                    // it keeps the group buttons of all rows aligned.
+                    val handle = if (item.isLocal) {
+                        Modifier.alpha(0f)
+                    } else {
+                        Modifier.draggableHandle(
+                            onDragStopped = {
+                                dragEndIndex?.let {
+                                    onReorder(
+                                        internalPlayers.map { p -> p.player.id },
+                                        item.player.id,
+                                    )
+                                }
+                            },
                         )
                     }
+                    Icon(
+                        modifier = Modifier
+                            .padding(start = 8.dp)
+                            .then(handle)
+                            .size(16.dp),
+                        imageVector = TablerIcons.GripVertical,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                    )
                 }
             }
         }

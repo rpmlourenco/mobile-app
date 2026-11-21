@@ -46,6 +46,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
@@ -64,7 +65,6 @@ import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil3.compose.AsyncImage
-import io.music_assistant.client.data.model.client.MediaType
 import io.music_assistant.client.data.model.client.Player
 import io.music_assistant.client.data.model.client.PlayerData
 import io.music_assistant.client.data.model.client.PlayerDataFixtures
@@ -122,6 +122,8 @@ private const val BUFFER_TRACK_ALPHA = 0.45f
 fun CompactPlayerItem(
     modifier: Modifier,
     item: PlayerData,
+    // Replaces the type icon where the artwork has no image; the mark of a device audio share.
+    artworkIcon: ImageVector? = null,
     colors: PlayerColors,
     playerAction: (PlayerData, PlayerAction) -> Unit = { _, _ -> },
     onSelectPlayer: (() -> Unit)? = null,
@@ -132,6 +134,9 @@ fun CompactPlayerItem(
     livePositionFlow: Flow<Double>? = null,
     // True where the vertical bar carries Play and Next, as beside the collapsed player.
     transportOnBar: Boolean = false,
+    // Grouping goes into the player chip if there is one ([onSelectPlayer]), else before Play, in place of Next.
+    // A player without grouping shows neither.
+    onGroup: (() -> Unit)? = null,
 ) {
     val currentMedia = item.player.currentMedia
     val onPrimaryContainer = MaterialTheme.colorScheme.onPrimaryContainer
@@ -170,7 +175,7 @@ fun CompactPlayerItem(
                     val placeholder = rememberPlaceholderPainter(
                         backgroundColor = colors.dominant,
                         iconColor = onPrimaryContainer,
-                        icon = TrackIcon,
+                        icon = artworkIcon ?: TrackIcon,
                     )
                     AsyncImage(
                         placeholder = placeholder,
@@ -183,7 +188,7 @@ fun CompactPlayerItem(
                     )
                 } else {
                     Icon(
-                        imageVector = AlbumIcon,
+                        imageVector = artworkIcon ?: AlbumIcon,
                         contentDescription = null,
                         modifier = Modifier.size(24.dp),
                         tint = onPrimaryContainer.inactive(),
@@ -251,6 +256,10 @@ fun CompactPlayerItem(
             }
         }
 
+        onGroup?.takeIf { onSelectPlayer == null && item.offersGrouping }?.let {
+            GroupButton(player = item, onClick = it, tint = colors.controlTint)
+        }
+
         if (item.player.isPoweredOff) {
             IconButton(
                 modifier = Modifier.size(48.dp),
@@ -269,7 +278,7 @@ fun CompactPlayerItem(
                     playerAction = playerAction,
                     showAdditionalButtons = showAdditionalControls,
                     mainButtonSize = 48.dp,
-                    showSkip = true,
+                    showSkip = onGroup == null || onSelectPlayer != null,
                     showSkipBack = onSelectPlayer != null,
                     tint = colors.controlTint,
                     chapterProgressEnabled = chapterProgressEnabled,
@@ -288,6 +297,7 @@ fun CompactPlayerItem(
                     controlTint = colors.controlTint,
                     sendSpinState = sendSpinState,
                     onSelectPlayer = onSelectPlayer,
+                    onGroup = onGroup,
                 )
             }
         }
@@ -310,6 +320,8 @@ private fun trackNameAndContentDescription(title: String?): Pair<String, String>
 fun FullPlayerItem(
     modifier: Modifier,
     item: PlayerData,
+    // Replaces the type icon where the artwork has no image; the mark of a device audio share.
+    artworkIcon: ImageVector? = null,
     colors: PlayerColors,
     playerAction: (PlayerData, PlayerAction) -> Unit,
     // Null hides the heart: the user cannot edit the library.
@@ -329,6 +341,8 @@ fun FullPlayerItem(
     onAmbientSoundClick: (() -> Unit)? = null,
     // Server preference gate for the chapter-relative timeline.
     chapterProgressEnabled: Boolean = true,
+    // The waveform bins of the current track; null draws the plain track.
+    waveform: List<Float>? = null,
     navigateToItem: (AppMediaItem) -> Unit = {},
     // The chooser for a multi-artist track lives in the dialog host, outside the pager.
     onChooseArtist: () -> Unit = {},
@@ -371,7 +385,7 @@ fun FullPlayerItem(
                     rememberPlaceholderPainter(
                         backgroundColor = colors.dominant,
                         iconColor = onPrimaryContainer,
-                        icon = currentMedia.defaultIcon,
+                        icon = artworkIcon ?: currentMedia.defaultIcon,
                     )
                 AsyncImage(
                     placeholder = placeholder,
@@ -383,7 +397,7 @@ fun FullPlayerItem(
                     modifier = Modifier.fillMaxSize(),
                 )
             } ?: Icon(
-                imageVector = currentMedia?.defaultIcon ?: AlbumIcon,
+                imageVector = artworkIcon ?: currentMedia?.defaultIcon ?: AlbumIcon,
                 contentDescription = null,
                 modifier = Modifier.size(120.dp),
                 tint = onPrimaryContainer,
@@ -394,7 +408,10 @@ fun FullPlayerItem(
         val poweredOff = item.player.isPoweredOff
         val (trackName, trackContentDescription) = item.player.dormantLabel()
             ?.let { it to it }
-            ?: trackNameAndContentDescription(currentMedia?.title)
+            // An input of the device, such as a TV input, can report no title: name the source.
+            ?: trackNameAndContentDescription(
+                currentMedia?.title ?: item.externalSource?.name?.takeIf { it.isNotBlank() },
+            )
 
         // Powered off: present the "no media" state — disabled slider, empty time labels.
         val duration = if (poweredOff) null else currentMedia?.duration?.takeIf { it > 0 }?.toFloat()
@@ -419,7 +436,7 @@ fun FullPlayerItem(
         val timelinePosition =
             currentChapter?.relativeSec(displayPosition.toDouble())?.toFloat() ?: displayPosition
         // A radio stream cannot seek, not even in a song whose length it reports.
-        val seekable = timelineDuration != null && currentMedia?.mediaType != MediaType.RADIO
+        val seekable = timelineDuration != null && item.canSeekContent
 
         val titleTrack = (item.queueInfo?.currentItem?.track as? Track)?.takeIf { !poweredOff }
         // The title does the overflow's "Go to track".
@@ -561,6 +578,9 @@ fun FullPlayerItem(
                 ?: timelinePosition
         }
 
+        val trackEnabled = currentMedia != null && !item.player.isAnnouncing && !poweredOff
+        // A disabled timeline keeps the plain track and its disabled colors.
+        val shownWaveform = waveform?.takeIf { trackEnabled }
         val progressSliderColors = SliderDefaults.colors().copy(
             thumbColor = controlTint,
             activeTrackColor = controlTint,
@@ -592,12 +612,37 @@ fun FullPlayerItem(
                     sliderPosition.takeIf { seekable }?.let {
                         SliderDefaults.Thumb(
                             interactionSource = remember { MutableInteractionSource() },
-                            thumbSize = DpSize(16.dp, 16.dp),
+                            // Over a waveform the thumb is a playhead line that covers no bar.
+                            thumbSize = if (shownWaveform != null) {
+                                DpSize(4.dp, WAVEFORM_HEIGHT + 8.dp)
+                            } else {
+                                DpSize(16.dp, 16.dp)
+                            },
                             colors = progressSliderColors,
                         )
                     }
                 },
-                track = { sliderState ->
+                track = track@{ sliderState ->
+                    // A waveform is shown for a track only, so it has no chapter ticks.
+                    shownWaveform?.let { bins ->
+                        val bufferedFraction = timelineDuration
+                            ?.takeIf { item.isLocal && it > 0f && bufferedAheadSec > 0f }
+                            ?.let { (timelinePosition + bufferedAheadSec) / it }
+                            ?: 0f
+                        WaveformTrack(
+                            bins = bins,
+                            playedFraction = {
+                                val range = sliderState.valueRange
+                                val span = range.endInclusive - range.start
+                                if (span > 0f) (sliderState.value - range.start) / span else 0f
+                            },
+                            bufferedFraction = bufferedFraction,
+                            playedColor = controlTint,
+                            bufferedColor = controlTint.copy(alpha = BUFFER_TRACK_ALPHA),
+                            restColor = controlTint.inactive(),
+                        )
+                        return@track
+                    }
                     val audiobook = item.queueInfo?.currentItem?.track as? Audiobook
                     val chapters = audiobook?.chapters
                     // Square inside corners leave a full or empty track, and the buffered band,
@@ -609,7 +654,7 @@ fun FullPlayerItem(
                             thumbTrackGapSize = 0.dp,
                             trackInsideCornerSize = 0.dp,
                             drawStopIndicator = null,
-                            enabled = currentMedia != null && !item.player.isAnnouncing && !poweredOff,
+                            enabled = trackEnabled,
                             modifier = Modifier.height(8.dp),
                         )
                         // Buffered-ahead highlight — the region between the real playhead and

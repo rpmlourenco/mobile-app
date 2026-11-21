@@ -33,14 +33,16 @@ import io.music_assistant.client.data.model.client.items.Track
 import io.music_assistant.client.data.model.client.items.hasFiniteTracklist
 import io.music_assistant.client.data.model.client.items.ownerLine
 import io.music_assistant.client.data.model.client.items.refreshItemAction
+import io.music_assistant.client.data.model.server.ServerMediaItem
 import io.music_assistant.client.data.play.PlayDispatcher
 import io.music_assistant.client.data.play.PlayMode
 import io.music_assistant.client.data.play.PlayRequest
 import io.music_assistant.client.data.repository.ItemRefresher
+import io.music_assistant.client.data.repository.LyricsRepository
 import io.music_assistant.client.data.repository.MediaItemChange
 import io.music_assistant.client.data.repository.MediaItemRepository
+import io.music_assistant.client.data.repository.PlaylistTransfer
 import io.music_assistant.client.data.repository.ProviderRepository
-import io.music_assistant.client.data.repository.TranscriptRepository
 import io.music_assistant.client.data.repository.favoriteAfter
 import io.music_assistant.client.settings.PlayedFilter
 import io.music_assistant.client.settings.SettingsRepository
@@ -73,7 +75,8 @@ class ItemDetailsViewModel(
     private val providerRepository: ProviderRepository,
     private val itemRefresher: ItemRefresher,
     private val authCoordinator: AuthCoordinator,
-    private val transcriptRepository: TranscriptRepository,
+    private val lyricsRepository: LyricsRepository,
+    private val playlistTransfer: PlaylistTransfer,
     private val itemId: String,
     private val mediaType: MediaType,
     private val providerId: String,
@@ -161,7 +164,8 @@ class ItemDetailsViewModel(
     private var rawAlbums: List<Album> = emptyList()
     private var rawPlayableItems: List<PlayableItem> = emptyList()
     private var playableItemsContext: SubItemContext? = null
-    private var transcriptJob: Job? = null
+    private var lyricsJob: Job? = null
+    private var exportJob: Job? = null
 
     /** Inputs of the visible playable list. Null while that list is not Data; see [setPlayableItemsState]. */
     private val playableInputs = MutableStateFlow<PlayableInputs?>(null)
@@ -274,6 +278,10 @@ class ItemDetailsViewModel(
         mediaType: MediaType,
         providerId: String,
     ): AppMediaItem? {
+        // The server looks an external item up and answers the item that it found.
+        if (providerId == ServerMediaItem.EXTERNAL_PROVIDER && mainDataSource.externalItemsSupported.value) {
+            return mediaItemRepository.fetchMediaItem(Request.Library.item(mediaType, itemId, providerId)).getOrNull()
+        }
         val request = when (mediaType) {
             MediaType.ARTIST -> Request.Artist.get(itemId, providerId)
             MediaType.ALBUM -> Request.Album.get(itemId, providerId)
@@ -292,6 +300,8 @@ class ItemDetailsViewModel(
     }
 
     private fun loadSubItems(item: AppMediaItem) {
+        lyricsJob?.cancel()
+        _state.update { it.copy(lyrics = null) }
         when (item) {
             is Artist -> {
                 // Prefetch similar artists in the background so the sheet opens warm: the server's
@@ -428,7 +438,7 @@ class ItemDetailsViewModel(
 
     /** The library genres mapped to a library item. The server maps none to an item of a music service. */
     private fun loadGenres(item: AppMediaItem) {
-        if (!item.isInLibrary) {
+        if (!item.isLibraryItem) {
             _state.update { it.copy(genres = emptyList()) }
             return
         }
@@ -459,12 +469,12 @@ class ItemDetailsViewModel(
             setPlayableItemsState(DataState.Loading())
 
             try {
-                val tracks = mediaItemRepository.fetchMediaItems(
+                val tracks = mediaItemRepository.fetchAllMediaItems(
                     Request.Album.getTracks(
                         itemId = itemId,
                         providerInstanceIdOrDomain = provider,
                     ),
-                ).getOrNull()
+                )
                     ?.filterIsInstance<Track>()
                     ?: emptyList()
 
@@ -568,9 +578,9 @@ class ItemDetailsViewModel(
 
     /** Follows the transcript of [episode] into [State.lyrics]; the repository loads it once. */
     private fun loadTranscript(episode: PodcastEpisode) {
-        transcriptJob?.cancel()
-        transcriptJob = viewModelScope.launch {
-            transcriptRepository.also { it.load(episode) }.transcript(episode).collect { transcript ->
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch {
+            lyricsRepository.also { it.load(episode) }.transcript(episode).collect { transcript ->
                 _state.update { it.copy(lyrics = transcript.dataOrNull) }
             }
         }
@@ -645,11 +655,11 @@ class ItemDetailsViewModel(
                 _state.update { it.copy(similarTracksState = similar) }
             }
         }
-        viewModelScope.launch {
-            val lyrics = track.lyrics ?: mediaItemRepository.fetchTrackLyrics(track)
-                .onFailure { Logger.e("Failed to load track lyrics", it) }
-                .getOrNull()
-            _state.update { it.copy(lyrics = lyrics) }
+        lyricsJob?.cancel()
+        lyricsJob = viewModelScope.launch {
+            lyricsRepository.also { it.load(track) }.lyrics(track).collect { lyrics ->
+                _state.update { it.copy(lyrics = lyrics.dataOrNull) }
+            }
         }
     }
 
@@ -723,7 +733,7 @@ class ItemDetailsViewModel(
 
         val mediaUri = itemToPlay.mediaUri ?: return
         mainDataSource.selectedPlayer?.queueOrPlayerId?.let { queueId ->
-            Logger.withTag("PlayDispatch").i {
+            Logger.withTag("Session.PlayDispatch").i {
                 "ItemDetailsViewModel.onPlayClick: uri=$mediaUri mode=$mode " +
                         "startItem=${startItem?.itemId} queue=$queueId"
             }
@@ -745,7 +755,7 @@ class ItemDetailsViewModel(
         (_state.value.itemState as? DataState.Data)?.data?.let { item ->
             item.uri?.let { uri ->
                 mainDataSource.selectedPlayer?.queueOrPlayerId?.let { queueId ->
-                    Logger.withTag("PlayDispatch").i {
+                    Logger.withTag("Session.PlayDispatch").i {
                         "ItemDetailsViewModel.onChapterClick: uri=$uri " +
                                 "chapter=$chapterPosition queue=$queueId"
                     }
@@ -774,7 +784,6 @@ class ItemDetailsViewModel(
         when (item) {
             is Podcast -> loadPodcastEpisodes(item.itemId, item.provider)
             is PodcastEpisode -> loadOtherEpisodes(item)
-            else -> Unit
         }
     }
 
@@ -829,6 +838,16 @@ class ItemDetailsViewModel(
     /** The [ItemRefresher] sends it in the app scope; [ItemRefresher.refreshed] gives the answer. */
     fun refreshItem() {
         _state.value.itemOrNull()?.uri?.let(itemRefresher::refresh)
+    }
+
+    /** Shares the M3U8 file of the loaded library playlist. A server error reaches the user through the error bus. */
+    fun exportPlaylist(chooserTitle: String) {
+        val playlist = (_state.value.itemOrNull() as? Playlist)?.takeIf { it.isLibraryItem } ?: return
+        if (exportJob?.isActive == true) return
+        exportJob = viewModelScope.launch {
+            playlistTransfer.export(playlist, chooserTitle)
+                .onFailure { Logger.withTag("ItemDetailsVM").e(it) { "Export of ${playlist.uri} failed" } }
+        }
     }
 
     fun reload() {

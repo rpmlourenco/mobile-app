@@ -28,6 +28,13 @@ fun PlayerData.groupBadge(): String? {
     }
 }
 
+/**
+ * True if the player offers grouping. The phone offers it only while the server lists it (then
+ * it has child candidates), like the web frontend, which hides a hidden player.
+ */
+val PlayerData.offersGrouping: Boolean
+    get() = !isLocal || childrenBinds.isNotEmpty() || player.isGrouped
+
 /** The player name and count for the text-only navigation overflow menu. */
 fun PlayerData.overflowLabel(): String {
     val count = groupBadge()
@@ -38,7 +45,8 @@ fun PlayerData.overflowLabel(): String {
     }
 }
 
-fun PlayerData.iconRes(): DrawableResource {
-    val iconId = if (this.isLocal) SharedIcons.SMARTPHONE else this.player.icon
-    return SharedIcons.getResource(iconId)
-}
+fun PlayerData.iconRes(): DrawableResource = playerIconRes(player.icon, isLocal)
+
+/** The icon of a player: the phone for the local player, else the shared icon [icon] names. */
+fun playerIconRes(icon: String?, isLocal: Boolean): DrawableResource =
+    SharedIcons.getResource(if (isLocal) SharedIcons.SMARTPHONE else icon)

@@ -9,7 +9,6 @@ import io.music_assistant.client.api.Answer
 import io.music_assistant.client.api.Request
 import io.music_assistant.client.api.ServiceClient
 import io.music_assistant.client.api.fetchAllPages
-import io.music_assistant.client.data.MainDataSource.Companion.resolveSelectedPlayerId
 import io.music_assistant.client.data.factory.MediaItemFactory
 import io.music_assistant.client.data.factory.PlayerFactory
 import io.music_assistant.client.data.factory.QueueFactory
@@ -20,6 +19,7 @@ import io.music_assistant.client.data.model.client.Queue
 import io.music_assistant.client.data.model.client.QueueInfo
 import io.music_assistant.client.data.model.client.SongTiming
 import io.music_assistant.client.data.model.client.byId
+import io.music_assistant.client.data.model.client.chapterSeekSeconds
 import io.music_assistant.client.data.model.client.isBefore
 import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.LongFormSeekDefaults
@@ -37,6 +37,7 @@ import io.music_assistant.client.data.model.server.RefreshItemAccess
 import io.music_assistant.client.data.model.server.ServerPlayer
 import io.music_assistant.client.data.model.server.ServerQueue
 import io.music_assistant.client.data.model.server.ServerQueueItem
+import io.music_assistant.client.data.model.server.SleepTimerMode
 import io.music_assistant.client.data.model.server.events.MediaItemDeletedEvent
 import io.music_assistant.client.data.model.server.events.MediaItemPlayedEvent
 import io.music_assistant.client.data.model.server.events.PlayerAddedEvent
@@ -50,6 +51,7 @@ import io.music_assistant.client.data.model.server.playMediaSupport
 import io.music_assistant.client.data.model.server.refreshItemAccess
 import io.music_assistant.client.data.model.server.supportsAiRadio
 import io.music_assistant.client.data.model.server.supportsDislike
+import io.music_assistant.client.data.model.server.supportsExternalItems
 import io.music_assistant.client.data.model.server.supportsPlaylistAccess
 import io.music_assistant.client.data.model.server.supportsSearchSources
 import io.music_assistant.client.data.play.PlayDispatcher
@@ -64,6 +66,7 @@ import io.music_assistant.client.ui.compose.common.DataState
 import io.music_assistant.client.ui.compose.common.StaleReason
 import io.music_assistant.client.ui.compose.common.action.PlayerAction
 import io.music_assistant.client.ui.compose.common.action.QueueAction
+import io.music_assistant.client.ui.compose.home.QueueDisplayRow
 import io.music_assistant.client.utils.AuthProcessState
 import io.music_assistant.client.utils.DataConnectionState
 import io.music_assistant.client.utils.HasConnectionData
@@ -112,13 +115,27 @@ internal fun List<PlayerData>.withPlayRequestsPending(
  * The song each queue's radio stream reports, or null; see [PlayerPositionTracker.setSong].
  * Media stamped for another queue item is not that queue's stream.
  */
-internal fun radioSongTimings(players: List<Player>, queues: List<QueueInfo>): Map<String, SongTiming?> =
+internal fun radioSongTimings(
+    players: List<Player>,
+    queues: List<QueueInfo>,
+): Map<String, SongTiming?> =
     queues.associate { queue ->
         queue.id to players
             .filter { it.queueId == queue.id }
             .firstNotNullOfOrNull { player ->
                 player.currentMedia?.takeIf { it.queueItemId == queue.currentItem?.id }?.songTiming
             }
+    }
+
+/**
+ * Where each player is in the media of its external source, or null; see
+ * [PlayerPositionTracker.setSource]. A queue has its own position.
+ */
+internal fun externalSourceTimings(players: List<Player>): Map<String, Pair<SongTiming, Boolean>?> =
+    players.associate { player ->
+        player.sourcePositionKey to player.currentMedia?.timing
+            ?.takeIf { player.externalSource != null }
+            ?.let { it to player.isPlaying }
     }
 
 /** Preserve newer event/optimistic state when a delayed full snapshot arrives. */
@@ -158,7 +175,7 @@ class MainDataSource(
     private val queueFactory: QueueFactory,
     private val playDispatcher: PlayDispatcher,
     providerRepository: ProviderRepository,
-) : ItemDetailsMainDataSource, CoroutineScope {
+) : ItemDetailsMainDataSource, RemoteVolumeTarget, CoroutineScope {
     private val log = Logger.withTag("MainDataSource")
 
     /** Combined inputs for a [MainDataSource] player-data rebuild. */
@@ -199,7 +216,7 @@ class MainDataSource(
     private val aiRadioSupported: Flow<Boolean> =
         combine(providerRepository.providers, apiClient.sessionState) { providers, session ->
             providers.dataOrNull.orEmpty().any { it.domain == AI_RADIO_DOMAIN && it.available } &&
-                supportsAiRadio((session as? HasConnectionData)?.serverInfo?.schemaVersion)
+                    supportsAiRadio((session as? HasConnectionData)?.serverInfo?.schemaVersion)
         }
 
     /**
@@ -238,6 +255,12 @@ class MainDataSource(
     override val playlistAccessSupported: StateFlow<Boolean> =
         apiClient.sessionState
             .map { supportsPlaylistAccess((it as? HasConnectionData)?.serverInfo?.schemaVersion) }
+            .stateIn(this, SharingStarted.Eagerly, false)
+
+    /** Whether the server looks up an external item ([supportsExternalItems]). False while no session is up. */
+    override val externalItemsSupported: StateFlow<Boolean> =
+        apiClient.sessionState
+            .map { supportsExternalItems((it as? HasConnectionData)?.serverInfo?.schemaVersion) }
             .stateIn(this, SharingStarted.Eagerly, false)
 
     /** Whether `music/search` takes `providers` ([supportsSearchSources]). False while no session is up. */
@@ -311,16 +334,46 @@ class MainDataSource(
             .distinctUntilChanged()
             .stateIn(this, SharingStarted.Eagerly, null)
 
-    val isAnythingPlaying =
+    /** The like button of the local current item for the system media UI (CarPlay). */
+    val nowPlayingLike: StateFlow<NowPlayingLike> =
+        combine(localPlayer, grantedScopes, ::nowPlayingLikeOf)
+            .distinctUntilChanged()
+            .stateIn(this, SharingStarted.Eagerly, NowPlayingLike.UNAVAILABLE)
+
+    private fun nowPlayingLikeOf(data: PlayerData?, scopes: GrantedScopes): NowPlayingLike =
+        buildNowPlayingLike(
+            playerData = data,
+            canEditLibrary = scopes.canEditLibrary,
+            canFavoriteOnAir = data?.let(::canFavoriteCurrentlyPlaying) == true,
+        )
+
+    /**
+     * A tap on the like button of [nowPlayingLike]. Reads the state again from the
+     * current local player, so the action always matches the item that plays now.
+     */
+    fun toggleNowPlayingLike() {
+        val data = localPlayer.value ?: return
+        when (nowPlayingLikeOf(data, grantedScopes.value)) {
+            NowPlayingLike.LIKED, NowPlayingLike.NOT_LIKED ->
+                (data.queueInfo?.currentItem?.track as? AppMediaItem)?.let(::toggleFavorite)
+
+            NowPlayingLike.ON_AIR -> launch {
+                favoriteCurrentlyPlaying(data).onFailure { log.w(it) { "On-air favorite failed" } }
+            }
+
+            NowPlayingLike.UNAVAILABLE -> Unit
+        }
+    }
+
+    /**
+     * The players the pager shows. An unreachable player is only listed dimmed: its stale queue
+     * or "playing" state must not keep the media service, the notification or the Wi-Fi lock.
+     */
+    val displayedPlayers: StateFlow<List<PlayerData>> =
         playersData
             .mapNotNull { it as? DataState.Data<List<PlayerData>> }
-            .map { it.data.any { data -> data.player.isPlaying } }
-            .stateIn(this, SharingStarted.Eagerly, false)
-    val doesAnythingHavePlayableItem =
-        playersData
-            .mapNotNull { it as? DataState.Data<List<PlayerData>> }
-            .map { it.data.any { data -> data.queueInfo?.currentItem != null } }
-            .stateIn(this, SharingStarted.Eagerly, false)
+            .map { it.data.filter { data -> data.player.isSelectable } }
+            .stateIn(this, SharingStarted.Eagerly, emptyList())
 
     /**
      * Persisted user choice. Restored from settings on startup and written
@@ -444,8 +497,8 @@ class MainDataSource(
                 .mapNotNull { (it as? DataState.Data)?.data }
                 .collect { list ->
                     list.forEach { pd ->
-                        pd.queueInfo?.id?.let { queueId ->
-                            positionTracker.setPlaying(queueId, pd.player.isPlaying)
+                        pd.positionKey?.let { key ->
+                            positionTracker.setPlaying(key, pd.player.isPlaying)
                         }
                     }
                 }
@@ -466,6 +519,9 @@ class MainDataSource(
                     // Before the players publish, so every reader of a new song also reads its position.
                     input.players.dataOrNull?.let { radioSongTimings(it, input.queues) }
                         ?.forEach { (queueId, timing) -> positionTracker.setSong(queueId, timing) }
+                    input.players.dataOrNull?.let(::externalSourceTimings)?.forEach { (key, report) ->
+                        positionTracker.setSource(key, report?.first, isPlaying = report?.second == true)
+                    }
                     _playersData.update { oldValues ->
                         fun build(serverPlayers: List<Player>) = DataState.Data(
                             buildPlayerDataList(
@@ -507,8 +563,10 @@ class MainDataSource(
 
                                     when (currentState.reason) {
                                         StaleReason.RECONNECTING -> {
-                                            // Brief disconnection — data is still fresh. Transition
-                                            // stale → Data without re-fetching to avoid a UI blink.
+                                            // Brief disconnection: show the cached data at once, so
+                                            // the UI does not blink, and re-fetch it, because the
+                                            // server does not replay the events of the gap (a track
+                                            // change, for example). The merge keeps newer event data.
                                             // This branch only runs when dataConnectionState is
                                             // already Authenticated; if a reconnect requires re-auth,
                                             // the else branch below preserves Stale data until
@@ -517,10 +575,7 @@ class MainDataSource(
                                             _serverPlayers.update {
                                                 DataState.Data(currentState.data)
                                             }
-
-                                            // selectedPlayerIndex doesn't re-emit on stale-recovery
-                                            // (same value before/after), so refresh manually.
-                                            refreshSelectedPlayerQueueItems()
+                                            updatePlayersAndQueues()
 
                                             // Sendspin reinit: WebRTC sendspin auth is inherited
                                             // from the data channel itself, not JSON-RPC auth state,
@@ -804,18 +859,11 @@ class MainDataSource(
             localPlayerController.wantsSession
                 .collect { if (it) apiClient.onPlaybackActive() else apiClient.onPlaybackInactive() }
         }
-
-        // Every play_media for the local player (library, car, Siri, AI Radio) wants the next
-        // stream: lift a local hold before that stream arrives.
-        launch {
-            playDispatcher.accepted.collect { if (isLocalQueue(it)) localPlayerController.onPlaybackRequested() }
-        }
     }
 
-    /** The local player is addressed by its player id or by its queue id. */
+    /** The local player is addressed by its player id or by its queue id; see [LocalPlayerAdapter.ownsQueue]. */
     private fun isLocalQueue(queueOrPlayerId: String): Boolean =
-        queueOrPlayerId == settings.sendspinEffectivePlayerId.value ||
-            queueOrPlayerId == localPlayerController.localPlayerData.value?.queueId
+        localPlayerController.ownsQueue(queueOrPlayerId)
 
     /**
      * Build the merged player data list for [_playersData].
@@ -830,74 +878,18 @@ class MainDataSource(
         busyQueueIds: Set<String>,
         oldValues: DataState<List<PlayerData>>,
     ): List<PlayerData> {
-        val localPlayerId = settings.sendspinEffectivePlayerId.value
-        // User's saved order (unknown players last, in server order); name order until one is saved.
-        val allPlayers = sortedIds?.let {
-            serverPlayers.sortedBy { player -> sortedIds.indexOf(player.id).takeIf { it >= 0 } ?: Int.MAX_VALUE }
-        } ?: serverPlayers.sortedBy { it.name }
-        val oldPlayers = (oldValues as? DataState.Data)?.data.orEmpty()
-        val playerDataList = allPlayers
-            .map { player ->
-                val isLocal = player.id == localPlayerId
-                val parent =
-                    (player.activeGroup ?: player.syncedTo)
-                        ?.let { parentId -> allPlayers.firstOrNull { it.id == parentId } }
-                        ?.asParentBind()
-                val groupChildren =
-                    // No children for local player or if player is part of group
-                    if (isLocal || parent != null) {
-                        emptyList()
-                    } else {
-                        // Grouping is a command, so an unreachable player is no candidate:
-                        // the server would drop the set_members call for it.
-                        allPlayers.filter { it.isAvailable }
-                            .mapNotNull { it.asChildBindFor(player) }
-                    }
-                val fresh = if (isLocal && localData != null) {
-                    // Repository is source of truth for the local player; surface the
-                    // latest server-anchored `elapsedTime` from `_queueInfos` so the slider
-                    // re-anchors on `QueueTimeUpdatedEvent` (which writes only to
-                    // `_queueInfos`, not the repository). The slider does its own
-                    // sub-second interpolation locally — see `rememberInterpolatedPosition`.
-                    val trackedElapsed = queues.find {
-                        it.id == player.queueId || it.id == localPlayerId
-                    }?.elapsedTime
-                    trackedElapsed?.let {
-                        (localData.queue as? DataState.Data)?.let { qd ->
-                            localData.copy(
-                                queue = DataState.Data(
-                                    qd.data.copy(info = qd.data.info.copy(elapsedTime = it)),
-                                ),
-                                parentBind = parent,
-                            )
-                        }
-                    } ?: localData
-                } else {
-                    PlayerData(
-                        player = player,
-                        queue = queues.find { it.id == player.queueId }
-                            ?.let { queueInfo ->
-                                DataState.Data(
-                                    Queue(info = queueInfo, items = DataState.NoData()),
-                                )
-                            } ?: DataState.NoData(),
-                        parentBind = parent,
-                        childrenBinds = groupChildren,
-                        isLocal = isLocal,
-                    )
-                }
-                // Preserve loaded queue items from previous state
-                oldPlayers.firstOrNull { it.player.id == player.id }?.updateFrom(fresh) ?: fresh
-            }
-
-        // The local player is pinned first regardless of the saved order, whether the server
-        // lists it or it is still the synthetic stand-in (SelectPlayerDialog won't move it).
-        val (serverLocal, others) = playerDataList.partition { it.isLocal }
-        val withLocal = serverLocal.ifEmpty { listOfNotNull(localData) } + others
+        val merged = mergePlayerDataList(
+            localPlayerId = settings.sendspinEffectivePlayerId.value,
+            serverPlayers = serverPlayers,
+            sortedIds = sortedIds,
+            queues = queues,
+            localData = localData,
+            oldPlayers = (oldValues as? DataState.Data)?.data.orEmpty(),
+        )
         // Fill any null now-playing artwork from the queue track, then re-apply favorite
         // overrides last so the stale queue payload can't win. The two patches are
         // independent (currentMedia vs queue.currentItem.track.favorite), so order is free.
-        return withLocal
+        return merged
             .map { applyNowPlayingArtwork(it) }
             .withPlayRequestsPending(busyQueueIds, queues)
             .let { list ->
@@ -963,7 +955,8 @@ class MainDataSource(
      * Like toggle for [item], for the surfaces with one heart button (the media-session
      * favorite action and the player on servers without dislike). A dislike toggles to a like.
      */
-    fun toggleFavorite(item: AppMediaItem) = setFavorite(item, if (item.favorite == true) null else true)
+    fun toggleFavorite(item: AppMediaItem) =
+        setFavorite(item, if (item.favorite == true) null else true)
 
     /**
      * True when [playerData] has a real on-air stream song the connected server can
@@ -1225,14 +1218,37 @@ class MainDataSource(
             return
         }
         val resolved = playerRequestFactory.resolve(data, action)
-        launch {
-            val request = playerRequestFactory.buildRequest(data, resolved) ?: return@launch
-            val result = apiClient.sendRequest(request)
-            if (result.isFailure) {
-                log.e(
-                    result.exceptionOrNull(),
-                ) { "Failed to send player action request for ${data.player.name}: $action" }
-            }
+        launch { sendResolved(data, resolved) }
+    }
+
+    /**
+     * A tap on a queue row of a car surface: a queue item plays, a chapter row seeks
+     * within the current book, like the in-app queue.
+     */
+    fun selectQueueRow(data: PlayerData, row: QueueDisplayRow) {
+        when (row) {
+            is QueueDisplayRow.QueueItem -> queueAction(
+                QueueAction.PlayQueueItem(data.queueInfo?.id ?: data.player.id, row.item.id),
+            )
+
+            is QueueDisplayRow.ChapterItem ->
+                playerAction(data, PlayerAction.SeekTo(chapterSeekSeconds(row.chapter.start)))
+        }
+    }
+
+    override val isReadyForCommands: StateFlow<Boolean>
+        get() = apiClient.isReadyForCommands
+
+    override suspend fun sendRemotePlayerAction(data: PlayerData, action: PlayerAction) =
+        sendResolved(data, playerRequestFactory.resolve(data, action))
+
+    private suspend fun sendResolved(data: PlayerData, action: PlayerAction) {
+        val request = playerRequestFactory.buildRequest(data, action) ?: return
+        val result = apiClient.sendRequest(request)
+        if (result.isFailure) {
+            log.e(
+                result.exceptionOrNull(),
+            ) { "Failed to send player action request for ${data.player.name}: $action" }
         }
     }
 
@@ -1252,6 +1268,14 @@ class MainDataSource(
         }
     }
 
+    /** Stops [playerId] at the end of the item or chapter that plays now. See [setSleepTimer]. */
+    fun setSleepTimer(playerId: String, mode: SleepTimerMode) {
+        launch {
+            apiClient.sendRequest(Request.Player.setSleepTimer(playerId, mode))
+                .onFailure { log.e(it) { "Failed to set sleep timer $mode for $playerId" } }
+        }
+    }
+
     /** Clears the server-side sleep timer on [playerId]. See [setSleepTimer]. */
     fun clearSleepTimer(playerId: String) {
         launch {
@@ -1264,7 +1288,7 @@ class MainDataSource(
         launch {
             when (action) {
                 is QueueAction.PlayQueueItem -> {
-                    if (isLocalQueue(action.queueId)) localPlayerController.onPlaybackRequested()
+                    localPlayerController.prepareQueue(action.queueId)
                     apiClient.sendRequest(
                         Request.Queue.playIndex(
                             queueId = action.queueId,
@@ -1373,7 +1397,9 @@ class MainDataSource(
                             val data = playerFactory.create(event.data)
                             // Forward to local player repository if this is the local player
                             if (data.id == settings.sendspinEffectivePlayerId.value) {
-                                localPlayerController.onServerPlayerUpdate(data)
+                                forwardLocalPlayer(
+                                data,
+                            )
                             }
                             _serverPlayers.update { oldState ->
                                 when (oldState) {
@@ -1403,12 +1429,10 @@ class MainDataSource(
                             val data = queueFactory.create(event.data).takeIfNotStale("QueueAdded")
                                 ?: return@collect
 
-                            val localPlayerId = settings.sendspinEffectivePlayerId.value
-                            if (data.id == localPlayerId ||
-                                (_serverPlayers.value as? DataState.Data)?.data
-                                    ?.find { it.id == localPlayerId }?.queueId == data.id
-                            ) {
-                                localPlayerController.onServerQueueUpdate(data)
+                            if (isLocalQueue(data.id)) {
+                                localPlayerController.onServerQueueUpdate(
+                                data,
+                            )
                             }
 
                             // Upsert: replace if present, append if new.
@@ -1438,12 +1462,10 @@ class MainDataSource(
                                     ?: return@collect
 
                             // Forward to local player repository if this is the local player's queue
-                            val localPlayerId = settings.sendspinEffectivePlayerId.value
-                            if (data.id == localPlayerId ||
-                                (_serverPlayers.value as? DataState.Data)?.data
-                                    ?.find { it.id == localPlayerId }?.queueId == data.id
-                            ) {
-                                localPlayerController.onServerQueueUpdate(data)
+                            if (isLocalQueue(data.id)) {
+                                localPlayerController.onServerQueueUpdate(
+                                data,
+                            )
                             }
 
                             _queueInfos.update { value ->
@@ -1577,7 +1599,9 @@ class MainDataSource(
                 // the stale queue payload.
                 is MediaItemChange.FavoriteUpdated -> setFavoriteOverride(track, track.favorite)
                 is MediaItemChange.Updated ->
-                    track.favorite?.takeIf { change.carriesFavorite }?.let { setFavoriteOverride(track, it) }
+                    track.favorite?.takeIf { change.carriesFavorite }
+                        ?.let { setFavoriteOverride(track, it) }
+
                 is MediaItemChange.Added -> Unit
                 is MediaItemChange.Deleted -> return@collect
             }
@@ -1587,7 +1611,8 @@ class MainDataSource(
 
     private fun updateMediaTrackInfo(newTrack: Track, change: MediaItemChange) {
         // The new version of a queue row keeps the favorite of the row if the change has none.
-        val replacing = { current: PlayableItem -> newTrack.withFavorite(change.favoriteAfter(current.favorite)) }
+        val replacing =
+            { current: PlayableItem -> newTrack.withFavorite(change.favoriteAfter(current.favorite)) }
         _playersData.update { currentState ->
             when (currentState) {
                 is DataState.Error,
@@ -1635,6 +1660,19 @@ class MainDataSource(
         }
     }
 
+    /**
+     * The server state of the local player, listed or hidden, goes to the adapter. Its queue
+     * follows at once when it changed: a member plays the queue of its leader, and that queue
+     * may already be known while its next event is far away.
+     */
+    private fun forwardLocalPlayer(player: Player) {
+        val previousQueueId = localPlayerController.localPlayerData.value?.queueId
+        localPlayerController.onServerPlayerUpdate(player)
+        if (player.queueId == previousQueueId) return
+        _queueInfos.value.find { it.id == player.queueId }
+            ?.let { localPlayerController.onServerQueueUpdate(it) }
+    }
+
     private fun updatePlayersAndQueues() {
         log.i { "Updating players and queues" }
         launch {
@@ -1645,18 +1683,18 @@ class MainDataSource(
                     _serverPlayers.update {
                         DataState.Data(visiblePlayers)
                     }
-                    // Forward to repository: real player if found, synthetic if not
+                    // Forward to repository: real player if found, synthetic if not. The local
+                    // player is looked up in the full list: the server hides it by default, and
+                    // the adapter is its source of truth whether or not the server lists it.
                     val localPlayerId = settings.sendspinEffectivePlayerId.value
                     // An unreachable Sendspin player still counts as absent: the synthetic
                     // local player must take over, or Android Auto is left without one.
                     val localServerPlayer =
-                        visiblePlayers.find { it.id == localPlayerId && it.isAvailable }
+                        list.find { it.id == localPlayerId && it.isAvailable }
                     localPlayerController.onInitialPlayersReceived(
                         hasLocalPlayer = localServerPlayer != null,
                     )
-                    localServerPlayer?.let {
-                        localPlayerController.onServerPlayerUpdate(it)
-                    }
+                    localServerPlayer?.let { forwardLocalPlayer(it) }
                 }
         }
         launch {
@@ -1681,10 +1719,7 @@ class MainDataSource(
                     }
 
                     // Forward local player's queue to repository
-                    val localPlayerId = settings.sendspinEffectivePlayerId.value
-                    val localQueueId = (_serverPlayers.value as? DataState.Data)?.data
-                        ?.find { it.id == localPlayerId }?.queueId
-                    mergedSnapshot.find { it.id == localPlayerId || it.id == localQueueId }
+                    mergedSnapshot.find { isLocalQueue(it.id) }
                         ?.let { localPlayerController.onServerQueueUpdate(it) }
                 }
         }
@@ -1844,8 +1879,8 @@ class MainDataSource(
          */
         internal fun isSessionEligible(data: PlayerData): Boolean =
             data.player.isAvailable &&
-                data.player.canPlay &&
-                data.queueInfo?.currentItem != null
+                    data.player.canPlay &&
+                    data.queueInfo?.currentItem != null
 
         internal fun resolveSelectedPlayerId(
             visiblePlayerIds: List<String>,
@@ -1853,6 +1888,108 @@ class MainDataSource(
         ): String? {
             if (userChoice != null && userChoice in visiblePlayerIds) return userChoice
             return visiblePlayerIds.firstOrNull()
+        }
+
+        /**
+         * The player list: the local player first, from the adapter ([localData]), then the
+         * server players in the saved order. The server copy of the local player is left out:
+         * the adapter is its source of truth, and the server hides the phone by default. The
+         * local player gets its sync parent from its own server state, so the "playing with"
+         * overlay is as stable as the state. Grouping follows the web frontend: only a listed
+         * player is a child candidate or offers children, so a hidden phone takes no part.
+         */
+        internal fun mergePlayerDataList(
+            localPlayerId: String,
+            serverPlayers: List<Player>,
+            sortedIds: List<String>?,
+            queues: List<QueueInfo>,
+            localData: PlayerData?,
+            oldPlayers: List<PlayerData>,
+        ): List<PlayerData> {
+            // User's saved order (unknown players last, in server order); name order until one is saved.
+            val others = sortedIds?.let { ids ->
+                serverPlayers.sortedBy { player ->
+                    ids.indexOf(player.id).takeIf { it >= 0 } ?: Int.MAX_VALUE
+                }
+            } ?: serverPlayers.sortedBy { it.name }
+            val remotePlayers = others.filter { it.id != localPlayerId }
+            // Grouping is a command, so an unreachable player is no candidate:
+            // the server would drop the set_members call for it.
+            val candidates = others.filter { it.isAvailable }
+            val localListed = others.any { it.id == localPlayerId }
+            fun parentOf(player: Player): PlayerData.ParentBind? =
+                (player.activeGroup ?: player.syncedTo)
+                    ?.let { parentId -> remotePlayers.firstOrNull { it.id == parentId } }
+                    ?.asParentBind()
+
+            // No children for a player that is itself a member.
+            fun childrenOf(
+                player: Player,
+                parent: PlayerData.ParentBind?,
+            ): List<PlayerData.ChildBind> =
+                if (parent != null) {
+                    emptyList()
+                } else {
+                    candidates.mapNotNull {
+                    it.asChildBindFor(
+                        player,
+                    )
+                }
+                }
+
+            val local = localData?.let { data ->
+                // Surface the latest server-anchored `elapsedTime` from `_queueInfos` so the
+                // slider re-anchors on `QueueTimeUpdatedEvent` (which writes only to
+                // `_queueInfos`, not the adapter). The slider does its own sub-second
+                // interpolation locally — see `rememberInterpolatedPosition`.
+                val trackedElapsed =
+                    queues.find { it.id == data.player.queueId || it.id == localPlayerId }?.elapsedTime
+                val queue = (data.queue as? DataState.Data)
+                    ?.takeIf { trackedElapsed != null }
+                    ?.let { qd ->
+                        DataState.Data(qd.data.copy(info = qd.data.info.copy(elapsedTime = trackedElapsed)))
+                    }
+                    ?: data.queue
+                val parent = parentOf(data.player)
+                data.copy(
+                    queue = queue,
+                    parentBind = parent,
+                    childrenBinds = if (localListed) {
+                        childrenOf(
+                        data.player,
+                        parent,
+                    )
+                    } else {
+                        emptyList()
+                    },
+                )
+            }
+            val remote = remotePlayers.map { player ->
+                val parent = parentOf(player)
+                PlayerData(
+                    player = player,
+                    queue = queues.find { it.id == player.queueId }
+                        ?.let { queueInfo ->
+                            DataState.Data(
+                                Queue(
+                                    info = queueInfo,
+                                    items = DataState.NoData(),
+                                ),
+                            )
+                        }
+                        ?: DataState.NoData(),
+                    parentBind = parent,
+                    childrenBinds = childrenOf(player, parent),
+                )
+            }
+            // Preserve loaded queue items from previous state
+            return (listOfNotNull(local) + remote).map { fresh ->
+                // An external source replaces the queue: do not keep the queue of before it.
+                oldPlayers.firstOrNull { it.player.id == fresh.player.id }
+                    ?.takeIf { fresh.player.externalSource == null }
+                    ?.updateFrom(fresh)
+                    ?: fresh
+            }
         }
     }
 }

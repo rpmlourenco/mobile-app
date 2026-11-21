@@ -4,28 +4,38 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import co.touchlab.kermit.Logger
 import io.music_assistant.client.api.APICommands
+import io.music_assistant.client.api.DeepLinkBus
+import io.music_assistant.client.api.DeepLinkDestination
 import io.music_assistant.client.api.Request
 import io.music_assistant.client.api.ServiceClient
 import io.music_assistant.client.data.MainDataSource
 import io.music_assistant.client.data.model.client.Lyrics
 import io.music_assistant.client.data.model.client.Player
 import io.music_assistant.client.data.model.client.PlayerData
+import io.music_assistant.client.data.model.client.PlayerDelay
 import io.music_assistant.client.data.model.client.Shortcut
+import io.music_assistant.client.data.model.client.WaveformKey
 import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.Genre
 import io.music_assistant.client.data.model.client.items.PodcastEpisode
 import io.music_assistant.client.data.model.client.items.RecommendationFolder
 import io.music_assistant.client.data.model.client.items.Track
 import io.music_assistant.client.data.model.server.ServerUser
+import io.music_assistant.client.data.model.server.SleepTimerMode
 import io.music_assistant.client.data.model.server.events.PlaylogUpdatedEvent
+import io.music_assistant.client.data.model.server.supportsAutoplayRepeatLock
 import io.music_assistant.client.data.model.server.supportsLeaderLeave
 import io.music_assistant.client.data.model.server.supportsSleepTimer
+import io.music_assistant.client.data.model.server.supportsSleepTimerModes
+import io.music_assistant.client.data.model.server.supportsWaveform
 import io.music_assistant.client.data.play.PlayDispatcher
 import io.music_assistant.client.data.play.PlayMode
 import io.music_assistant.client.data.play.PlayRequest
+import io.music_assistant.client.data.repository.LyricsRepository
 import io.music_assistant.client.data.repository.MediaItemChange
 import io.music_assistant.client.data.repository.MediaItemRepository
-import io.music_assistant.client.data.repository.TranscriptRepository
+import io.music_assistant.client.data.repository.SendspinDelayRepository
+import io.music_assistant.client.data.repository.WaveformRepository
 import io.music_assistant.client.data.repository.favoriteAfter
 import io.music_assistant.client.data.repository.fetchRecommendationRowItems
 import io.music_assistant.client.data.repository.fetchRecommendationRows
@@ -45,7 +55,9 @@ import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -58,6 +70,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -84,6 +97,13 @@ internal fun List<Player>.findByIdOrName(query: String): Player? =
             ?: candidates.find { it.name.equals(query, ignoreCase = true) }
     }
 
+// Deep-link target (play and players links): null = the selected player, `local` = this device's built-in player.
+internal fun List<PlayerData>.findPlayTarget(query: String?, selectedId: String?): PlayerData? = when {
+    query == null -> selectedId?.let { id -> find { it.playerId == id } }
+    query.equals(DeepLinkBus.LOCAL_PLAYER, ignoreCase = true) -> find { it.isLocal }
+    else -> map { it.player }.findByIdOrName(query)?.let { match -> find { it.playerId == match.id } }
+}
+
 @OptIn(FlowPreview::class)
 class HomeScreenViewModel(
     private val apiClient: ServiceClient,
@@ -91,29 +111,43 @@ class HomeScreenViewModel(
     private val settings: SettingsRepository,
     private val mediaItemRepository: MediaItemRepository,
     private val playDispatcher: PlayDispatcher,
-    private val transcriptRepository: TranscriptRepository,
+    private val lyricsRepository: LyricsRepository,
+    private val sendspinDelays: SendspinDelayRepository,
+    private val waveformRepository: WaveformRepository,
 ) : ViewModel() {
     private val jobs = mutableListOf<Job>()
     private var loadDataJob: Job? = null
     private var deepLinkPlayerJob: Job? = null
+    private val _deepLinkPlayFailures = Channel<DeepLinkDestination.Play>(Channel.BUFFERED)
 
-    // Local (Sendspin) player identity — used by the group dialog to decide
-    // whether to show the playback-delay adjuster.
+    /** A play deep link whose player did not show up in time; nothing was played. */
+    val deepLinkPlayFailures: Flow<DeepLinkDestination.Play> = _deepLinkPlayFailures.receiveAsFlow()
+
+    // Local (Sendspin) player identity — the group sheet shows it with the phone icon.
     val localPlayerId: String
         get() = settings.sendspinEffectivePlayerId.value
 
-    fun adjustSendspinStaticDelayMs(deltaMs: Int) {
-        settings.setSendspinStaticDelayMs(settings.sendspinStaticDelayMs.value + deltaMs)
-    }
+    /** The delay of each player that has one, for the group sheet. See [SendspinDelayRepository]. */
+    val playerDelays: StateFlow<Map<String, PlayerDelay>> get() = sendspinDelays.delays
+
+    fun loadPlayerDelays(playerIds: Collection<String>) = sendspinDelays.load(playerIds)
+
+    fun adjustPlayerDelay(playerId: String, deltaMs: Int) = sendspinDelays.adjust(playerId, deltaMs)
 
     /** Live elapsed-time flow for the slider. Ticks at 500 ms only while playing + subscribed. */
     fun observePosition(queueId: String) = dataSource.positionTracker.observe(queueId)
 
-    /** Loads the transcript of [episode] once, for the lyrics sheet. See [TranscriptRepository]. */
-    fun loadTranscript(episode: PodcastEpisode) = transcriptRepository.load(episode)
+    /** Loads the transcript of [episode] once, for the lyrics sheet. See [LyricsRepository]. */
+    fun loadTranscript(episode: PodcastEpisode) = lyricsRepository.load(episode)
 
     /** The transcript of [episode], as [loadTranscript] loads it. */
-    fun transcript(episode: PodcastEpisode): StateFlow<DataState<Lyrics>> = transcriptRepository.transcript(episode)
+    fun transcript(episode: PodcastEpisode): StateFlow<DataState<Lyrics>> = lyricsRepository.transcript(episode)
+
+    /** Loads missing lyrics once per track, independently of player updates and recomposition. */
+    fun loadTrackLyrics(track: Track) = lyricsRepository.load(track)
+
+    /** Embedded lyrics, or the server result shared by the player button and lyrics panel. */
+    fun trackLyrics(track: Track): StateFlow<DataState<Lyrics>> = lyricsRepository.lyrics(track)
 
     /**
      * Server-synced `audiobook_chapter_progress` gate for the chapter-relative timeline.
@@ -129,6 +163,22 @@ class HomeScreenViewModel(
      */
     fun observeLocalBufferedSeconds() = dataSource.localBufferedSeconds.sample(BUFFER_REAL_INTERVAL)
 
+    /** User toggle: whether the expanded player draws the track waveform on the seek bar. */
+    val showWaveform = settings.showWaveform
+
+    /** Whether the server has `audio_analysis/wave_form`; the toggle stays hidden without it. */
+    val waveformSupported: StateFlow<Boolean> =
+        apiClient.sessionState
+            .map { supportsWaveform((it as? HasConnectionData)?.serverInfo?.schemaVersion) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), false)
+
+    /** Loads the waveform of [key], the current track of [queueId], for the seek bar. See [WaveformRepository]. */
+    fun loadWaveform(queueId: String, key: WaveformKey) = waveformRepository.load(queueId, key)
+
+    /** The waveform of [key] on [queueId], as [loadWaveform] loads it. */
+    fun waveform(queueId: String, key: WaveformKey): StateFlow<DataState<List<Float>>> =
+        waveformRepository.waveform(queueId, key)
+
     /** User toggle: whether the now-playing slider draws the buffered-ahead segment. */
     val showBufferVisualization = settings.showBufferVisualization
 
@@ -141,6 +191,18 @@ class HomeScreenViewModel(
     val sleepTimerSupported: StateFlow<Boolean> =
         apiClient.sessionState
             .map { supportsSleepTimer((it as? HasConnectionData)?.serverInfo?.schemaVersion) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), false)
+
+    /** The end-of-item and end-of-chapter sleep timers exist from schema 105 on. */
+    val sleepTimerModesSupported: StateFlow<Boolean> =
+        apiClient.sessionState
+            .map { supportsSleepTimerModes((it as? HasConnectionData)?.serverInfo?.schemaVersion) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), false)
+
+    /** Repeat ONE or ALL locks autoplay off from server 2.11 on. */
+    val repeatLocksAutoplay: StateFlow<Boolean> =
+        apiClient.sessionState
+            .map { supportsAutoplayRepeatLock((it as? HasConnectionData)?.serverInfo?.schemaVersion) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(), false)
 
     /**
@@ -415,7 +477,7 @@ class HomeScreenViewModel(
     /** Plays [item] on the queue that the caller names, for a surface that shows several players. */
     fun playOnQueue(queueOrPlayerId: String, item: AppMediaItem, mode: PlayMode) {
         val mediaUri = item.mediaUri ?: return
-        Logger.withTag("PlayDispatch")
+        Logger.withTag("Session.PlayDispatch")
             .i { "HomeScreenViewModel: uri=$mediaUri mode=$mode queue=$queueOrPlayerId" }
         playDispatcher.play(
             PlayRequest(
@@ -505,10 +567,35 @@ class HomeScreenViewModel(
         deepLinkPlayerJob = viewModelScope.launch {
             withTimeoutOrNull(DEEP_LINK_PLAYER_TIMEOUT) {
                 dataSource.playersData
-                    .mapNotNull { state -> state.dataOrNull?.map { it.player }?.findByIdOrName(query) }
+                    .mapNotNull { state -> state.dataOrNull?.findPlayTarget(query, selectedId = null)?.player }
                     .first()
             }?.let(dataSource::selectPlayer)
                 ?: Logger.withTag("HomeScreenVM").w { "Deep link: no selectable player '$query'" }
+        }
+    }
+
+    /**
+     * Plays a deep-linked media uri on the player it names, and selects that player. Waits for the
+     * player list (cold launch) like [selectPlayerByIdOrName]; no match in that time plays nothing.
+     */
+    fun playDeepLink(link: DeepLinkDestination.Play) {
+        deepLinkPlayerJob?.cancel()
+        deepLinkPlayerJob = viewModelScope.launch {
+            val target = withTimeoutOrNull(DEEP_LINK_PLAYER_TIMEOUT) {
+                combine(dataSource.playersData, dataSource.selectedPlayerId) { state, selectedId ->
+                    state.dataOrNull?.findPlayTarget(link.playerIdOrName, selectedId)
+                }.mapNotNull { it }.first()
+            } ?: run {
+                Logger.withTag("HomeScreenVM").w { "Deep link: no player for $link" }
+                _deepLinkPlayFailures.trySend(link)
+                return@launch
+            }
+            dataSource.selectPlayer(target.player)
+            Logger.withTag("Session.PlayDispatch")
+                .i { "Deep link: uri=${link.uri} option=${link.option} queue=${target.queueOrPlayerId}" }
+            playDispatcher.play(
+                PlayRequest(queueOrPlayerId = target.queueOrPlayerId, media = listOf(link.uri), option = link.option),
+            )
         }
     }
     fun playerAction(playerId: String, action: PlayerAction) =
@@ -518,6 +605,9 @@ class HomeScreenViewModel(
     fun queueAction(action: QueueAction) = dataSource.queueAction(action)
     fun setSleepTimer(playerId: String, seconds: Int) =
         dataSource.setSleepTimer(playerId, seconds)
+
+    fun setSleepTimer(playerId: String, mode: SleepTimerMode) =
+        dataSource.setSleepTimer(playerId, mode)
 
     fun clearSleepTimer(playerId: String) = dataSource.clearSleepTimer(playerId)
 

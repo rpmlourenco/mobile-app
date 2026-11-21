@@ -45,6 +45,7 @@ import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.ExpandMore
+import androidx.compose.material.icons.filled.Input
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PowerSettingsNew
 import androidx.compose.material.icons.filled.SwapHoriz
@@ -60,6 +61,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -85,6 +87,7 @@ import androidx.compose.ui.unit.Velocity
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.window.core.layout.WindowSizeClass
+import io.music_assistant.client.api.DeepLinkBus
 import io.music_assistant.client.data.announcement.AnnouncementRepository
 import io.music_assistant.client.data.hasFavoritableStreamTrack
 import io.music_assistant.client.data.model.client.AppMediaItemFixtures
@@ -92,13 +95,16 @@ import io.music_assistant.client.data.model.client.PlayerData
 import io.music_assistant.client.data.model.client.PlayerDataFixtures
 import io.music_assistant.client.data.model.client.PlayerDataFixtures.toQueue
 import io.music_assistant.client.data.model.client.PlayerDataFixtures.toQueueTrack
+import io.music_assistant.client.data.model.client.PlayerSource
 import io.music_assistant.client.data.model.client.QueueOption
 import io.music_assistant.client.data.model.client.chapterSeekSeconds
 import io.music_assistant.client.data.model.client.items.AppMediaItem
 import io.music_assistant.client.data.model.client.items.PodcastEpisode
 import io.music_assistant.client.data.model.client.items.Track
+import io.music_assistant.client.data.model.client.waveformKey
 import io.music_assistant.client.data.play.PlayMode
 import io.music_assistant.client.data.repository.QueueOverlayRepository
+import io.music_assistant.client.data.share.DeviceAudioRouter
 import io.music_assistant.client.ui.alphaOn
 import io.music_assistant.client.ui.compose.common.CenteredThreeSlotRow
 import io.music_assistant.client.ui.compose.common.DataState
@@ -113,6 +119,7 @@ import io.music_assistant.client.ui.compose.common.ToastState
 import io.music_assistant.client.ui.compose.common.action.PlayerAction
 import io.music_assistant.client.ui.compose.common.action.QueueAction
 import io.music_assistant.client.ui.compose.common.bufferIndicatorMenuOption
+import io.music_assistant.client.ui.compose.common.copyPlayLinkMenuOption
 import io.music_assistant.client.ui.compose.common.dynamicColorsMenuOption
 import io.music_assistant.client.ui.compose.common.icons.VolumeIcon
 import io.music_assistant.client.ui.compose.common.icons.VolumeMutedIcon
@@ -122,10 +129,15 @@ import io.music_assistant.client.ui.compose.common.rememberAnimatedPlayerColors
 import io.music_assistant.client.ui.compose.common.rememberDynamicColorsEnabled
 import io.music_assistant.client.ui.compose.common.rememberExtractedColorsSource
 import io.music_assistant.client.ui.compose.common.viewmodel.ActionsViewModel
+import io.music_assistant.client.ui.compose.common.waveformMenuOption
 import io.music_assistant.client.ui.compose.home.CollapsibleQueue
 import io.music_assistant.client.ui.compose.home.HomeScreenViewModel
 import io.music_assistant.client.ui.compose.home.HorizontalPagerIndicator
 import io.music_assistant.client.ui.compose.home.Queue
+import io.music_assistant.client.ui.compose.home.players.share.DeviceAudioIcon
+import io.music_assistant.client.ui.compose.home.players.share.SharedDeviceInfo
+import io.music_assistant.client.ui.compose.home.players.share.StopDeviceAudioIcon
+import io.music_assistant.client.ui.compose.home.players.share.rememberDeviceAudioShareUi
 import io.music_assistant.client.ui.compose.provider.ProviderViewModel
 import io.music_assistant.client.ui.inactive
 import io.music_assistant.client.ui.utils.FoldRegion
@@ -148,11 +160,15 @@ import musicassistantclient.composeapp.generated.resources.bound_player_playing_
 import musicassistantclient.composeapp.generated.resources.cd_more
 import musicassistantclient.composeapp.generated.resources.cd_mute
 import musicassistantclient.composeapp.generated.resources.cd_unmute
+import musicassistantclient.composeapp.generated.resources.device_audio_blocked_local_playing
+import musicassistantclient.composeapp.generated.resources.device_audio_play_here
+import musicassistantclient.composeapp.generated.resources.device_audio_stop
 import musicassistantclient.composeapp.generated.resources.player_power_off
 import musicassistantclient.composeapp.generated.resources.player_power_on
 import musicassistantclient.composeapp.generated.resources.players_dsp_settings
 import musicassistantclient.composeapp.generated.resources.players_loading
 import musicassistantclient.composeapp.generated.resources.players_none_available
+import musicassistantclient.composeapp.generated.resources.players_select_source
 import musicassistantclient.composeapp.generated.resources.queue_clear
 import musicassistantclient.composeapp.generated.resources.queue_label
 import musicassistantclient.composeapp.generated.resources.queue_no_other_players
@@ -206,6 +222,7 @@ fun PlayersPager(
     toastState: ToastState,
     navigateToItem: (AppMediaItem) -> Unit,
     onSelectPlayer: () -> Unit,
+    onGroupPlayer: (String) -> Unit,
 ) {
     LaunchedEffect(actionsViewModel, toastState) {
         actionsViewModel.toasts.collect { toastState.showToast(it) }
@@ -228,6 +245,10 @@ fun PlayersPager(
         // menu entry and the badge stay hidden entirely.
         val sleepTimerSupported by homeScreenViewModel.sleepTimerSupported
             .collectAsStateWithLifecycle()
+        val repeatLocksAutoplay by homeScreenViewModel.repeatLocksAutoplay
+            .collectAsStateWithLifecycle()
+        val showWaveform by homeScreenViewModel.showWaveform.collectAsStateWithLifecycle()
+        val waveformSupported by homeScreenViewModel.waveformSupported.collectAsStateWithLifecycle()
         val announcementAvailability by koinInject<AnnouncementRepository>().availability
             .collectAsStateWithLifecycle()
         // Null while the AI Radio DJ gate is closed, which hides the menu row.
@@ -238,6 +259,8 @@ fun PlayersPager(
             .collectAsStateWithLifecycle()
         // Write actions the user's role cannot run stay hidden.
         val grantedScopes = LocalGrantedScopes.current
+        val deviceAudioRouter = koinInject<DeviceAudioRouter>()
+        val deviceAudio = rememberDeviceAudioShareUi(state.playerData, deviceAudioRouter)
 
         val playerAction1 =
             { data: PlayerData, action: PlayerAction ->
@@ -337,13 +360,32 @@ fun PlayersPager(
                 val playerId = player.playerId
                 val currentQueueItem = player.queueInfo?.currentItem
                 val currentTrack = currentQueueItem?.track as? Track
+                val isCurrentPage = page == playerPagerState.currentPage
+                val trackLyrics = currentTrack?.let { track ->
+                    // Recreate collection on identity/metadata changes: never retain another track's value.
+                    key(track.provider, track.itemId, track.lyrics) {
+                        if (expanded && isCurrentPage) {
+                            LaunchedEffect(Unit) { homeScreenViewModel.loadTrackLyrics(track) }
+                        }
+                        remember { homeScreenViewModel.trackLyrics(track) }
+                            .collectAsStateWithLifecycle().value.dataOrNull
+                    }
+                }
                 // The transcript of an episode loads once its page is expanded, like the web fullscreen player.
                 val transcript = (currentQueueItem?.track as? PodcastEpisode)?.takeIf { expanded }?.let { episode ->
                     LaunchedEffect(episode.provider, episode.itemId) { homeScreenViewModel.loadTranscript(episode) }
                     remember(episode.provider, episode.itemId) { homeScreenViewModel.transcript(episode) }
                         .collectAsStateWithLifecycle().value.dataOrNull
                 }
-                val lyrics = currentTrack?.lyrics ?: transcript
+                val lyrics = trackLyrics ?: transcript
+                // The waveform of a track loads once its page is expanded and the user turned it on.
+                val waveform = player.queueId?.takeIf { expanded && showWaveform }?.let { queueId ->
+                    currentQueueItem?.waveformKey?.let { key ->
+                        LaunchedEffect(queueId, key) { homeScreenViewModel.loadWaveform(queueId, key) }
+                        remember(queueId, key) { homeScreenViewModel.waveform(queueId, key) }
+                            .collectAsStateWithLifecycle().value.dataOrNull
+                    }
+                }
                 val trackId = currentTrack?.itemId
                 val lyricsItemId = currentQueueItem?.track?.itemId
                 val queueItemId = currentQueueItem?.id
@@ -366,6 +408,25 @@ fun PlayersPager(
                     {
                         dialogRequest = PlayerDialogRequest.AmbientSound(playerId)
                     }
+                }
+                val deviceAudioOption = when {
+                    deviceAudio.sharing -> OverflowMenuOption(
+                        title = stringResource(Res.string.device_audio_stop),
+                        icon = StopDeviceAudioIcon,
+                        onClick = deviceAudioRouter::stop,
+                    )
+
+                    deviceAudio.canStartOn(player) -> OverflowMenuOption(
+                        title = stringResource(Res.string.device_audio_play_here),
+                        // The share restarts the audio link of the device, which would break its playback.
+                        subtitle = stringResource(Res.string.device_audio_blocked_local_playing)
+                            .takeIf { deviceAudio.blockedByLocalPlayback },
+                        icon = DeviceAudioIcon,
+                        enabled = !deviceAudio.blockedByLocalPlayback,
+                        onClick = { dialogRequest = PlayerDialogRequest.DeviceAudio(playerId) },
+                    )
+
+                    else -> null
                 }
                 val onLyricsClick: () -> Unit = remember(playerId, lyricsItemId) {
                     {
@@ -432,8 +493,10 @@ fun PlayersPager(
                         // recomposition — otherwise collectAsStateWithLifecycle would
                         // tear down and restart the position collector on every pass.
                         val queueId = player.queueInfo?.id
-                        val livePositionFlow = remember(queueId) {
-                            queueId?.let { homeScreenViewModel.observePosition(it) }
+                        // An external source has a position too, under its own key.
+                        val positionKey = player.positionKey
+                        val livePositionFlow = remember(positionKey) {
+                            positionKey?.let { homeScreenViewModel.observePosition(it) }
                         }
                         // Buffered-ahead seconds — local player only, and only when the user has the
                         // buffer indicator enabled; remote players / disabled → null (no segment).
@@ -446,9 +509,6 @@ fun PlayersPager(
                                 null
                             }
                         }
-                        // Only the displayed page drives the shared lyrics VM, so the button
-                        // tracks the player currently on screen.
-                        val isCurrentPage = page == playerPagerState.currentPage
                         if (!expanded) {
                             CollapsedPlayerPage(
                                 isWideScreen = isWideScreen,
@@ -456,19 +516,23 @@ fun PlayersPager(
                                 colors = colors,
                                 sendspinState = state.sendspinState,
                                 onSelectPlayer = onSelectPlayer,
+                                onGroup = { onGroupPlayer(player.playerId) },
                                 playerAction = playerAction1,
                                 chapterProgressEnabled = chapterProgressEnabled,
                                 livePositionFlow = livePositionFlow,
+                                playsDeviceAudio = deviceAudio.target?.playerId == playerId,
                             )
                         } else {
                             ExpandedPlayerPage(
                                 player = player,
                                 colors = colors,
                                 onSelectPlayer = onSelectPlayer,
+                                onGroup = { onGroupPlayer(player.playerId) },
                                 onDspButton = onDspButton.takeIf {
                                     !player.player.isGroup && grantedScopes.canConfigurePlayers
                                 },
                                 onSleepTimerButton = onSleepTimerButton.takeIf { sleepTimerSupported },
+                                repeatLocksAutoplay = repeatLocksAutoplay,
                                 // Voice is never offered for the phone's own player, so it alone can't show the entry.
                                 onAnnounceButton = onAnnounceButton.takeIf {
                                     announcementAvailability.text || (announcementAvailability.voice && !player.isLocal)
@@ -477,6 +541,8 @@ fun PlayersPager(
                                 onAmbientSoundButton = onAmbientSoundButton.takeIf {
                                     overlayAvailable && player.queueInfo?.overlay != null
                                 },
+                                deviceAudioOption = deviceAudioOption,
+                                playsDeviceAudio = deviceAudio.target?.playerId == playerId,
                                 playerAction = playerAction1,
                                 onAddToPlaylist = onAddToPlaylist.takeIf { grantedScopes.canEditLibrary },
                                 onStartEndlessMix = onStartEndlessMix,
@@ -521,6 +587,8 @@ fun PlayersPager(
                                 onPlaybackSpeedClick = onPlaybackSpeedClick,
                                 onChooseArtist = onChooseArtist,
                                 chapterProgressEnabled = chapterProgressEnabled,
+                                waveform = waveform,
+                                waveformToggleAvailable = waveformSupported && currentTrack != null,
                                 queueDjMenu = player.queueId?.let { queueDjState?.menuFor(it) },
                                 onQueueDjSelected = queueDjViewModel::select,
                             )
@@ -532,6 +600,14 @@ fun PlayersPager(
                             playerName = player.player.name,
                             parent = it,
                             moveToPlayer = moveToPlayer,
+                        )
+                    }
+                    // The device does not play while its audio is shared.
+                    if (player.isLocal && deviceAudio.sharing) {
+                        SharedDeviceInfo(
+                            modifier = Modifier.matchParentSize(),
+                            targetName = deviceAudio.target?.player?.name,
+                            onOpenTarget = { deviceAudio.target?.let { moveToPlayer(it.playerId) } },
                         )
                     }
                 }
@@ -589,10 +665,15 @@ private fun ExpandedPlayerPage(
     player: PlayerData,
     colors: PlayerColors,
     onSelectPlayer: () -> Unit,
+    onGroup: () -> Unit,
     onDspButton: (() -> Unit)?,
     onSleepTimerButton: (() -> Unit)?,
+    repeatLocksAutoplay: Boolean,
     onAnnounceButton: (() -> Unit)?,
     onAmbientSoundButton: (() -> Unit)?,
+    // Starts or stops the share of the device audio; null where neither applies.
+    deviceAudioOption: OverflowMenuOption? = null,
+    playsDeviceAudio: Boolean = false,
     playerAction: (PlayerData, PlayerAction) -> Unit,
     onAddToPlaylist: ((AppMediaItem) -> Unit)? = null,
     onStartEndlessMix: ((AppMediaItem) -> Unit)? = null,
@@ -619,6 +700,9 @@ private fun ExpandedPlayerPage(
     onAudioChainClick: () -> Unit = {},
     onPlaybackSpeedClick: () -> Unit = {},
     chapterProgressEnabled: Boolean = true,
+    waveform: List<Float>? = null,
+    // Whether the overflow menu offers the waveform toggle: a track on a server with waveforms.
+    waveformToggleAvailable: Boolean = false,
     queueDjMenu: QueueDjMenu? = null,
     onQueueDjSelected: (queueId: String, hostId: String?) -> Unit = { _, _ -> },
     // The left edge of the pager in the window. See [pageSplitOrNull].
@@ -704,8 +788,8 @@ private fun ExpandedPlayerPage(
                         player = player,
                         controlTint = colors.controlTint,
                         sendSpinState = sendspinState,
-                        groupBadge = player.groupBadge(),
                         onSelectPlayer = onSelectPlayer,
+                        onGroup = onGroup,
                     )
                 },
                 end = {
@@ -719,7 +803,13 @@ private fun ExpandedPlayerPage(
                         onOpenDsp = onDspButton,
                         onAnnounce = onAnnounceButton,
                         onAmbientSound = onAmbientSoundButton,
+                        deviceAudioOption = deviceAudioOption,
+                        // The device audio share owns the source of its target.
+                        sourceChoices = player.player.sourceChoices
+                            .takeUnless { player.isLocal || playsDeviceAudio }
+                            .orEmpty(),
                         onAddToPlaylist = onAddToPlaylist,
+                        showWaveformToggle = waveformToggleAvailable,
                         queueDjMenu = queueDjMenu,
                         onQueueDjSelected = onQueueDjSelected,
                     )
@@ -733,6 +823,7 @@ private fun ExpandedPlayerPage(
                 player = player,
                 tint = colors.controlTint,
                 onSleepTimerClick = onSleepTimerButton,
+                repeatLocksAutoplay = repeatLocksAutoplay,
                 onToggleAutoplay = { current ->
                     playerAction(player, PlayerAction.ToggleDontStopTheMusic(current = current))
                 },
@@ -756,6 +847,7 @@ private fun ExpandedPlayerPage(
                     CompactPlayerItem(
                         modifier = Modifier,
                         item = player,
+                        artworkIcon = DeviceAudioIcon.takeIf { playsDeviceAudio },
                         colors = colors,
                         playerAction = playerAction,
                         onSelectPlayer = if (isWideScreen && !isQueueExpanded) onSelectPlayer else null,
@@ -833,6 +925,7 @@ private fun ExpandedPlayerPage(
                                         )
                                     },
                                 item = player,
+                                artworkIcon = DeviceAudioIcon.takeIf { playsDeviceAudio },
                                 colors = colors,
                                 playerAction = playerAction,
                                 onFavoriteChange = onFavoriteChange,
@@ -846,6 +939,7 @@ private fun ExpandedPlayerPage(
                                 livePositionFlow = livePositionFlow,
                                 bufferedAheadSecFlow = bufferedAheadSecFlow,
                                 chapterProgressEnabled = chapterProgressEnabled,
+                                waveform = waveform,
                                 navigateToItem = navigateAndClose,
                                 onChooseArtist = onChooseArtist,
                             )
@@ -865,7 +959,7 @@ private fun ExpandedPlayerPage(
                                 activeTrackColor = controlTint,
                                 inactiveTrackColor = controlTint.inactive(),
                             )
-                            val isGroupBound = player.childrenBinds.any { it.isBound }
+                            val isGroupBound = player.usesGroupVolume
                             val isGroupForGesture by rememberUpdatedState(isGroupBound)
                             Row(
                                 modifier = Modifier.fillMaxSize().padding(horizontal = 32.dp),
@@ -879,7 +973,7 @@ private fun ExpandedPlayerPage(
                                         .clickable(enabled = player.player.canMute) {
                                             playerAction(
                                                 player,
-                                                if (player.childrenBinds.none { it.isBound }) {
+                                                if (!player.usesGroupVolume) {
                                                     PlayerAction.ToggleMute(player.player.currentMuteState)
                                                 } else {
                                                     PlayerAction.GroupToggleMute(player.player.currentMuteState)
@@ -902,6 +996,8 @@ private fun ExpandedPlayerPage(
                                 )
                                 VolumeSliderBox(
                                     modifier = Modifier.weight(1f),
+                                    hintColor = controlTint,
+                                    hintIconColor = MaterialTheme.colorScheme.background,
                                     volume = { currentVolume },
                                     onStepDown = {
                                         playerAction(
@@ -934,7 +1030,7 @@ private fun ExpandedPlayerPage(
                                         onValueChangeFinished = {
                                             playerAction(
                                                 player,
-                                                if (player.childrenBinds.none { it.isBound }) {
+                                                if (!player.usesGroupVolume) {
                                                     PlayerAction.VolumeSet(currentVolume.toDouble())
                                                 } else {
                                                     PlayerAction.GroupVolumeSet(currentVolume.toDouble())
@@ -1037,11 +1133,16 @@ private fun PlayerOverflowMenu(
     onOpenDsp: (() -> Unit)?,
     onAnnounce: (() -> Unit)?,
     onAmbientSound: (() -> Unit)?,
+    deviceAudioOption: OverflowMenuOption? = null,
+    // The sources that the user can select; empty hides the entry.
+    sourceChoices: List<PlayerSource> = emptyList(),
     onAddToPlaylist: ((AppMediaItem) -> Unit)? = null,
+    showWaveformToggle: Boolean = false,
     queueDjMenu: QueueDjMenu? = null,
     onQueueDjSelected: (queueId: String, hostId: String?) -> Unit = { _, _ -> },
 ) {
     var transferMenuExpanded by remember { mutableStateOf(false) }
+    var sourceMenuExpanded by remember { mutableStateOf(false) }
     var queueDjMenuExpanded by remember { mutableStateOf(false) }
     val currentTrack = currentPlayer.queueInfo?.currentItem?.track as? Track
 
@@ -1142,6 +1243,32 @@ private fun PlayerOverflowMenu(
         }
     }.orEmpty()
 
+    val sourceOptions = sourceChoices.takeIf { it.isNotEmpty() }?.let { choices ->
+        Box(modifier = Modifier.wrapContentSize(Alignment.TopStart)) {
+            OverflowMenu(
+                expanded = sourceMenuExpanded,
+                onClose = { sourceMenuExpanded = false },
+                options = choices.map { source ->
+                    val active = currentPlayer.player.isActive(source)
+                    OverflowMenuOption(
+                        title = source.name,
+                        trailingIcon = Icons.Default.Check.takeIf { active },
+                        enabled = !active,
+                        onClick = { playerAction(PlayerAction.SelectSource(source.id)) },
+                    )
+                },
+            )
+        }
+        listOf(
+            OverflowMenuOption(
+                title = stringResource(Res.string.players_select_source),
+                icon = Icons.Default.Input,
+                trailingIcon = Icons.AutoMirrored.Default.ArrowRight,
+                onClick = { sourceMenuExpanded = true },
+            ),
+        )
+    }.orEmpty()
+
     // Power sits at the very top of the menu, ahead of queue/player/navigation options.
     val powerOption = if (currentPlayer.player.canPower) {
         // Reads the dormant state, not the raw flag: an unreachable player reports itself
@@ -1172,6 +1299,7 @@ private fun PlayerOverflowMenu(
                 ),
             )
         }
+        deviceAudioOption?.let(::add)
         onAmbientSound?.let {
             val overlay = currentPlayer.queueInfo?.overlay
             add(
@@ -1201,15 +1329,22 @@ private fun PlayerOverflowMenu(
         if (currentPlayer.isLocal) {
             add(bufferIndicatorMenuOption())
         }
+        if (showWaveformToggle) {
+            add(waveformMenuOption())
+        }
     }
-    val playerActions = powerOption + queueOptions + queueDjOptions + displayOptions
+    val playerActions = powerOption + sourceOptions + queueOptions + queueDjOptions + displayOptions
 
-    // Track actions (bottom group): add-to-playlist + navigation (go to artist/album).
-    val navigationOptions =
-        (currentPlayer.queueInfo?.currentItem?.track as? AppMediaItem)?.navigationOptions(
-            navigateToItem,
+    // Track actions (bottom group): add-to-playlist, play link + navigation (go to artist/album).
+    val currentMedia = currentPlayer.queueInfo?.currentItem?.track as? AppMediaItem
+    val navigationOptions = currentMedia?.navigationOptions(navigateToItem) ?: emptyList()
+    // The link names this player; the built-in one as `local`, because its id differs per install.
+    val copyPlayLink = currentMedia?.takeIf { it.isPlayable }?.mediaUri?.let { uri ->
+        copyPlayLinkMenuOption(
+            mediaUri = uri,
+            player = if (currentPlayer.isLocal) DeepLinkBus.LOCAL_PLAYER else currentPlayer.playerId,
         )
-            ?: emptyList()
+    }
     val trackActions = buildList {
         currentTrack?.takeIf { onAddToPlaylist != null }?.let { track ->
             add(
@@ -1220,6 +1355,7 @@ private fun PlayerOverflowMenu(
                 ),
             )
         }
+        copyPlayLink?.let(::add)
         addAll(navigationOptions)
     }
 
@@ -1253,15 +1389,18 @@ private fun CollapsedPlayerPage(
     colors: PlayerColors,
     sendspinState: PlayerState?,
     onSelectPlayer: () -> Unit,
+    onGroup: () -> Unit,
     playerAction: (PlayerData, PlayerAction) -> Unit,
     // Server preference gate for chapter-based Next enablement and the chapter subtitle.
     chapterProgressEnabled: Boolean = true,
     livePositionFlow: Flow<Double>? = null,
+    playsDeviceAudio: Boolean = false,
 ) {
     val verticalBarArea = LocalDeviceChrome.current.verticalBarArea
     CompactPlayerItem(
         modifier = Modifier.padding(top = 8.dp, bottom = 16.dp),
         item = player,
+        artworkIcon = DeviceAudioIcon.takeIf { playsDeviceAudio },
         colors = colors,
         playerAction = playerAction,
         // The vertical bar already carries the player selection.
@@ -1270,6 +1409,8 @@ private fun CollapsedPlayerPage(
         chapterProgressEnabled = chapterProgressEnabled,
         livePositionFlow = livePositionFlow,
         transportOnBar = verticalBarArea != null,
+        // The wide row has grouping in its player chip; the vertical bar keeps Play and Next.
+        onGroup = onGroup.takeIf { verticalBarArea == null },
     )
 }
 
@@ -1289,8 +1430,10 @@ fun ExpandedPlayerPagePreview() {
                 MaterialTheme.colorScheme.onSurface,
             ),
             onSelectPlayer = {},
+            onGroup = {},
             onDspButton = null,
             onSleepTimerButton = null,
+            repeatLocksAutoplay = false,
             onAnnounceButton = null,
             onAmbientSoundButton = null,
             playerAction = { _, _ -> },
@@ -1327,8 +1470,10 @@ fun ExpandedPlayerPageMediumScreenPreview() {
                 MaterialTheme.colorScheme.onSurface,
             ),
             onSelectPlayer = {},
+            onGroup = {},
             onDspButton = null,
             onSleepTimerButton = null,
+            repeatLocksAutoplay = false,
             onAnnounceButton = null,
             onAmbientSoundButton = null,
             playerAction = { _, _ -> },
@@ -1365,8 +1510,10 @@ fun ExpandedPlayerPageExpandedScreenPreview() {
                 MaterialTheme.colorScheme.onSurface,
             ),
             onSelectPlayer = {},
+            onGroup = {},
             onDspButton = null,
             onSleepTimerButton = null,
+            repeatLocksAutoplay = false,
             onAnnounceButton = null,
             onAmbientSoundButton = null,
             playerAction = { _, _ -> },
@@ -1407,8 +1554,10 @@ fun ExpandedPlayerPageExpandedScreenPlusPreview() {
                 MaterialTheme.colorScheme.onSurface,
             ),
             onSelectPlayer = {},
+            onGroup = {},
             onDspButton = null,
             onSleepTimerButton = null,
+            repeatLocksAutoplay = false,
             onAnnounceButton = null,
             onAmbientSoundButton = null,
             playerAction = { _, _ -> },
@@ -1446,8 +1595,10 @@ fun ExpandedPlayerPagePhoneLandscapePreview() {
                 MaterialTheme.colorScheme.onSurface,
             ),
             onSelectPlayer = {},
+            onGroup = {},
             onDspButton = null,
             onSleepTimerButton = null,
+            repeatLocksAutoplay = false,
             onAnnounceButton = null,
             onAmbientSoundButton = null,
             playerAction = { _, _ -> },
@@ -1484,8 +1635,10 @@ fun ExpandedPlayerPageLargeScreenPreview() {
                 MaterialTheme.colorScheme.onSurface,
             ),
             onSelectPlayer = {},
+            onGroup = {},
             onDspButton = null,
             onSleepTimerButton = null,
+            repeatLocksAutoplay = false,
             onAnnounceButton = null,
             onAmbientSoundButton = null,
             playerAction = { _, _ -> },

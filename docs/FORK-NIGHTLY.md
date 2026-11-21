@@ -16,16 +16,18 @@ exact displayed-name artist ordering on legacy servers, and the signed fork pack
 
 ## Integrated upstream revision
 
-The current fork integrates official `main` at `13b6cb6d` (Android 0.17.0).
+The current fork integrates official `main` at `03cb1f4f` (Android 0.18.0 development version).
 The PCM-preservation option is carried into the extracted `sendspin-kmp` module,
 alongside upstream 24-bit audio and format-aware buffer sizing. The fork retains
 immediate Pause/Stop, screen-on lyrics, newest-first albums, legacy artist sorting,
 and the persistent signing key and application ID used by existing installations.
 
-The 2026-11-07 integration retains upstream player/grouping sheets, sidebar fixes,
-radio station versions and finite tracklists, and long-duration synced lyrics.
-The screen-on lyrics default now lives in the shared LyricsPanel so it applies
-to both the bottom sheet and the foldable layout.
+The 2026-11-21 integration includes official device audio sharing, source selection,
+Sendspin stream alignment fixes, play deep links, and the latest player/grouping UI.
+The PCM-preservation switch remains live alongside the new source configuration;
+resampling statistics remain available when soft correction is enabled. Screen-on
+lyrics, newest-first albums, exact-name legacy artist sorting, and signed nightly
+updates remain enabled.
 
 ## Signing setup (once)
 

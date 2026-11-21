@@ -3,6 +3,7 @@ package io.music_assistant.client.di
 import io.music_assistant.client.api.DeepLinkBus
 import io.music_assistant.client.api.ErrorMessageBus
 import io.music_assistant.client.api.KtorServiceClient
+import io.music_assistant.client.api.Request
 import io.music_assistant.client.api.ServiceClient
 import io.music_assistant.client.auth.AuthCoordinator
 import io.music_assistant.client.auth.AuthenticationManager
@@ -15,21 +16,31 @@ import io.music_assistant.client.data.LocalPlayerFactory
 import io.music_assistant.client.data.MainDataSource
 import io.music_assistant.client.data.PlayerPositionTracker
 import io.music_assistant.client.data.PlayerRequestFactory
+import io.music_assistant.client.data.RemoteVolumeTarget
 import io.music_assistant.client.data.SendspinLocalPlayerFactory
 import io.music_assistant.client.data.UserPreferences
 import io.music_assistant.client.data.announcement.AnnouncementRepository
 import io.music_assistant.client.data.factory.MediaItemFactory
 import io.music_assistant.client.data.factory.PlayerFactory
 import io.music_assistant.client.data.factory.QueueFactory
+import io.music_assistant.client.data.model.server.sendspinSourceInstanceId
 import io.music_assistant.client.data.play.PlayDispatcher
 import io.music_assistant.client.data.repository.AiRadioRepository
 import io.music_assistant.client.data.repository.ItemRefresher
 import io.music_assistant.client.data.repository.LibrarySortRepository
+import io.music_assistant.client.data.repository.LyricsRepository
 import io.music_assistant.client.data.repository.MediaItemRepository
+import io.music_assistant.client.data.repository.PartyRepository
+import io.music_assistant.client.data.repository.PlaylistTransfer
 import io.music_assistant.client.data.repository.ProviderRepository
 import io.music_assistant.client.data.repository.QueueOverlayRepository
+import io.music_assistant.client.data.repository.SendspinDelayRepository
 import io.music_assistant.client.data.repository.ServiceClientMediaItemRepository
-import io.music_assistant.client.data.repository.TranscriptRepository
+import io.music_assistant.client.data.repository.WaveformRepository
+import io.music_assistant.client.data.share.DeviceAudioRouter
+import io.music_assistant.client.data.share.DeviceAudioShare
+import io.music_assistant.client.data.share.DeviceAudioSource
+import io.music_assistant.client.data.share.UnsupportedDeviceAudioShare
 import io.music_assistant.client.imageloader.ArtworkDiskStore
 import io.music_assistant.client.imageloader.ArtworkRepository
 import io.music_assistant.client.imageloader.ArtworkTransport
@@ -47,6 +58,7 @@ import io.music_assistant.client.settings.provideSettings
 import io.music_assistant.client.ui.BackgroundRestrictionViewModel
 import io.music_assistant.client.ui.SchemaVersionWarningViewModel
 import io.music_assistant.client.ui.compose.auth.AuthenticationViewModel
+import io.music_assistant.client.ui.compose.common.DataState
 import io.music_assistant.client.ui.compose.common.DominantColorViewModel
 import io.music_assistant.client.ui.compose.common.providers.MdiCodepoints
 import io.music_assistant.client.ui.compose.common.viewmodel.ActionsViewModel
@@ -61,6 +73,7 @@ import io.music_assistant.client.ui.compose.library.AiRadioViewModel
 import io.music_assistant.client.ui.compose.library.BrowseViewModel
 import io.music_assistant.client.ui.compose.library.LibraryCategoriesViewModel
 import io.music_assistant.client.ui.compose.library.LibraryListViewModel
+import io.music_assistant.client.ui.compose.party.PartyViewModel
 import io.music_assistant.client.ui.compose.provider.ProviderViewModel
 import io.music_assistant.client.ui.compose.search.SearchViewModel
 import io.music_assistant.client.ui.compose.settings.CarActionsViewModel
@@ -69,6 +82,7 @@ import io.music_assistant.client.ui.compose.settings.DefaultClickActionsViewMode
 import io.music_assistant.client.ui.compose.settings.SendspinSettingsViewModel
 import io.music_assistant.client.ui.compose.settings.SettingsViewModel
 import io.music_assistant.client.ui.theme.ThemeViewModel
+import io.music_assistant.client.utils.HasConnectionData
 import io.music_assistant.client.utils.LocalNetworkPermissionGate
 import io.music_assistant.client.utils.NetworkMonitor
 import io.music_assistant.client.utils.appVersion
@@ -77,10 +91,15 @@ import io.music_assistant.sendspin.api.SendspinKeyStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 import org.koin.core.module.dsl.bind
 import org.koin.core.module.dsl.singleOf
 import org.koin.core.module.dsl.viewModelOf
 import org.koin.core.qualifier.named
+import org.koin.core.scope.Scope
 import org.koin.dsl.module
 
 /**
@@ -105,7 +124,7 @@ fun sharedModule(
         singleOf(::LocalNetworkPermissionGate)
         singleOf(::ErrorMessageBus)
         singleOf(::DeepLinkBus)
-        singleOf(::VolumeButtonService)
+        single { VolumeButtonService(get(), get(), CoroutineScope(SupervisorJob() + Dispatchers.Default)) }
         single<ArtworkDiskStore> {
             ArtworkDiskStore(
                 cache = buildArtworkDiskCache(toArtworkLoaderPlatformContext(get<PlatformContext>())),
@@ -127,6 +146,7 @@ fun sharedModule(
         }
         singleOf(serviceClientConstructor) { bind<ServiceClient>() }
         singleOf(::LogSharer)
+        singleOf(::PlaylistTransfer)
         single(createdAtStart = true) {
             ConnectionManager(
                 get(),
@@ -149,7 +169,17 @@ fun sharedModule(
         single { UserPreferences(get()) }   // Server-synced `auth/me` preferences
         singleOf(::PlayerRequestFactory)    // Pure PlayerAction → Request mapper
         single { LocalPlayerEndpoints(get(), get(), CoroutineScope(SupervisorJob() + Dispatchers.Default)) }
-        single<LocalPlayerFactory> { SendspinLocalPlayerFactory(get(), get(), get(), get(), get(), get()) }
+        single<LocalPlayerFactory> { SendspinLocalPlayerFactory(get(), get(), getOrNull(), get(), get(), get(), get()) }
+        single {                            // What the local player offers as a Sendspin source
+            val providers = get<ProviderRepository>().providers
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            DeviceAudioSource(
+                share = deviceAudioShare(),
+                instanceId = providers
+                    .map { state -> (state as? DataState.Data)?.data?.let(::sendspinSourceInstanceId) }
+                    .stateIn(scope, SharingStarted.Eagerly, null),
+            )
+        }
         singleOf(::LocalPlayerAdapter)      // Local player: app side of the Sendspin module
         singleOf(::MediaItemFactory)        // Stateless DTO → domain mapper
         singleOf(::PlayerFactory)           // Stateless DTO → domain mapper
@@ -170,6 +200,14 @@ fun sharedModule(
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
             )
         }
+        single {                            // Optional party plugin: the host's guest invite
+            PartyRepository(
+                apiClient = get(),
+                providerRepository = get(),
+                grantedScopes = get<MainDataSource>().grantedScopes,
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            )
+        }
         single {                            // Queue ambient sound overlay; Apply outlives the dialog
             QueueOverlayRepository(
                 apiClient = get(),
@@ -182,6 +220,31 @@ fun sharedModule(
             PlayDispatcher(
                 apiClient = get(),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+                beforeSend = get<LocalPlayerAdapter>()::prepareQueue,
+            )
+        }
+        single {                            // Device audio to a player; a share outlives the screen
+            val localPlayer = get<LocalPlayerAdapter>()
+            val apiClient = get<ServiceClient>()
+            val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+            DeviceAudioRouter(
+                share = deviceAudioShare(),
+                source = get(),
+                playerState = localPlayer.player.state,
+                endpoint = get<LocalPlayerEndpoints>().endpoint,
+                isListed = { uri ->
+                    apiClient.sendRequest(Request.Library.verifyItemUri(uri)).getOrNull()?.resultAs<Boolean>()
+                },
+                play = get<PlayDispatcher>()::play,
+                releasePlayer = { playerId, stop ->
+                    scope.launch {
+                        if (stop) apiClient.sendRequest(Request.Player.simpleCommand(playerId, STOP_COMMAND))
+                        // The id of a player is the id of its queue.
+                        apiClient.sendRequest(Request.Player.selectSource(playerId, source = playerId))
+                    }
+                },
+                errorBus = get(),
+                scope = scope,
             )
         }
         single<MediaItemRepository> { ServiceClientMediaItemRepository(get(), get()) }
@@ -191,16 +254,31 @@ fun sharedModule(
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
             )
         }
-        single {                            // Transcripts load once for the episode page and the player
-            TranscriptRepository(
+        single {                            // Lyrics and transcripts load once across Item Details and Now Playing
+            LyricsRepository(
                 mediaItemRepository = get(),
                 apiClient = get(),
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            )
+        }
+        single {                            // Waveforms load once for the pager pages
+            WaveformRepository(
+                apiClient = get(),
+                scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            )
+        }
+        single {                            // Sendspin player delays; a save outlives the group sheet
+            SendspinDelayRepository(
+                apiClient = get(),
+                grantedScopes = get<MainDataSource>().grantedScopes,
+                settings = get(),
                 scope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
             )
         }
         singleOf(::LibrarySortRepository)   // Library sort choices; caches the 2.11 sort_options
         singleOf(::MainDataSource)          // Singleton - held by foreground service
         single<ItemDetailsMainDataSource> { get<MainDataSource>() }
+        single<RemoteVolumeTarget> { get<MainDataSource>() }
         single(createdAtStart = true) {     // Eager - must observe car edges from launch
             CarDspApplier(get(), get(), get(), get())
         }
@@ -210,7 +288,7 @@ fun sharedModule(
         factory { BackgroundRestrictionViewModel(get(), get(), get()) }
         factory { SchemaVersionWarningViewModel(get()) }
         factory { ActionsViewModel(get(), get(), get(), get()) }
-        factory { SettingsViewModel(get(), get(), get(), get(), get()) }
+        factory { SettingsViewModel(get(), get(), get(), get(), get(), get(), get()) }
         factory {
             val mainDataSource = get<MainDataSource>()
             SendspinSettingsViewModel(
@@ -222,17 +300,19 @@ fun sharedModule(
         factory { CarActionsViewModel(get(), get()) }
         factory { CarDspViewModel(get(), get()) }
         factory { AiRadioViewModel(get(), get(), get()) }
+        factory { PartyViewModel(get()) }
         factory {
             AuthenticationViewModel(
                 auth = get(),
                 sessionStateFlow = get<ServiceClient>().sessionState,
             )
         }
-        factory { LibraryCategoriesViewModel(get(), get()) }
-        factory { params -> LibraryListViewModel(params[0], get(), get(), get(), get(), get(), get(), get()) }
+        factory { LibraryCategoriesViewModel(get(), get(), get()) }
+        factory { params -> LibraryListViewModel(params[0], get(), get(), get(), get(), get(), get(), get(), get()) }
         factory { params -> BrowseViewModel(params.getOrNull<String>(), get(), get(), get()) }
         factory { params ->
             ItemDetailsViewModel(
+                get(),
                 get(),
                 get(),
                 get(),
@@ -247,13 +327,16 @@ fun sharedModule(
             )
         }
         factory { params ->
-            ArtistDetailsViewModel(params[0], get(), get())
+            val serviceClient = get<ServiceClient>()
+            ArtistDetailsViewModel(params[0], get(), get()) {
+                (serviceClient.sessionState.value as? HasConnectionData)?.serverInfo?.schemaVersion
+            }
         }
         factory { ViewModeViewModel(get()) }
         factory { params -> ItemListViewModel(params[0], get(), get()) }
         factory { DspSettingsViewModel(get()) }
         factory { QueueDjViewModel(get(), get<MainDataSource>().aiRadioQueueDjAvailable) }
-        factory { HomeScreenViewModel(get(), get(), get(), get(), get(), get()) }
+        factory { HomeScreenViewModel(get(), get(), get(), get(), get(), get(), get(), get()) }
         factory { SearchViewModel(get(), get(), get(), get(), get()) }
         factory { ProviderViewModel(get(), get()) }
     }
@@ -265,3 +348,9 @@ fun sharedModule(
 fun cleanupSingletons() {
     // Cleanup is handled by individual components' lifecycle
 }
+
+/** The platform binds the capture where it has one (Android, in the application module). */
+private fun Scope.deviceAudioShare(): DeviceAudioShare = getOrNull() ?: UnsupportedDeviceAudioShare()
+
+/** The `players/cmd` command that ends playback. */
+private const val STOP_COMMAND = "stop"

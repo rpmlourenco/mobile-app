@@ -82,3 +82,5 @@ tmp/
 
 # Private Android signing key and password recovery file
 /MusicAssistantSigning/
+# Personal iOS signing overrides (see iosApp/Configuration/Config.xcconfig)
+iosApp/Configuration/Local.xcconfig

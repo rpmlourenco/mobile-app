@@ -64,11 +64,12 @@ actual class PlatformFeature {
 - **Models**: Server DTOs in `model/server/`, domain models in `model/client/`
 - **List payloads**: `library_items` and `player_queues/items` answer in one message and the
   server caps a message at about 9 MB. Never send a huge `limit`. Page with `Request.fetchAllPages`
-  (`api/Paging.kt`) when a caller needs the whole list. `playlist_tracks` and `podcast_episodes`
-  depend on the server version. Server 2.10 streams the whole list in 500-item `partial` batches
-  that `RpcEngine` reassembles, and it ignores `limit` and `offset`. Server 2.11 answers one
-  500-item page. `MediaItemRepository.fetchAllMediaItems` selects the method from the schema
-  (`SERVER_2_11_SCHEMA`), so load these two lists through it. `library_items` already
+  (`api/Paging.kt`) when a caller needs the whole list. `album_tracks`, `playlist_tracks` and
+  `podcast_episodes` depend on the server version. Server 2.10 answers the whole list, and it
+  ignores `limit` and `offset`. It streams the last two lists in 500-item `partial` batches that
+  `RpcEngine` reassembles. Server 2.11 answers one 500-item page. `MediaItemRepository.fetchAllMediaItems`
+  selects the method from the schema (`SERVER_2_11_SCHEMA`), so load these three lists through it,
+  also on the car surfaces. `library_items` already
   returns slim summary items by default.
 - **Collections**: an audiobook series is `MediaType.COLLECTION` (`MediaCollection`, books in `items`). The
   server returns series rows only when `library_items` gets `collapse_collections`. The Audiobooks top bar sets
@@ -78,18 +79,33 @@ actual class PlatformFeature {
 - **Input sources**: a live input from a server plugin is `MediaType.AUDIO_SOURCE` (`AudioSource`). The server
   puts the sources that a client can start at the `music/browse` root, from server 2.9.0. Play the source `uri`
   with `play_media`. A source never ends, so the long-press menu has "Play now" only. A source has no favorite
-  state. Native player inputs (`source_list`, `players/cmd/select_source`) are a different feature, and the
-  client does not show them.
+  state. The sources of a player (`source_list`, `players/cmd/select_source`) are a different feature. See
+  "Player sources".
 - **Ambient sound overlay**: the server mixes a looping `sound_effect` item into the queue stream, so all
   players on the stream hear it. `QueueOverlayRepository` (`data/repository/`) sends `player_queues/overlay`
   and loads the sounds with `music/sound_effects`. The command goes to the server for every player and is never
   a `PlayerAction`, so the local player does not intercept it. A null `QueueInfo.overlay` means that the server
   has no overlay support. Show the feature only if a provider has the `sound_effects` feature. To turn the overlay
   off, send `enabled=false` only, because the server keeps the last sound and volume.
+- **Player delay**: the group sheet (`GroupSettings`) adjusts the playback delay of the Sendspin players
+  only. A higher value plays earlier (`PlayerDelay`, `data/model/client/`). The local player keeps its
+  delay in `SettingsRepository.sendspinStaticDelayMs`. The other Sendspin players keep it on the server, in
+  the player config entry `sendspin_static_delay` (0 to 5000 ms). The server offers the entry only for a
+  player that accepts the output delay command, and the app does not. `SendspinDelayRepository`
+  (`data/repository/`) loads the entry with `config/players/get` and saves it with `config/players/save`.
+  A device with more than one output protocol (an ESPHome device with a Sendspin output) carries the
+  entry under `<protocol player id>||protocol||sendspin_static_delay`, and its native output entries
+  under the bare key. `ServerPlayerConfig.outputEntry` picks the entry of the preferred output, and the
+  save goes to the parent player under that full key. A save applies at once and restarts nothing. The save needs `config.players.write`, so the repository
+  loads nothing for a user without it. `SendspinDelayRepository.delays` joins both sources and routes
+  an adjust by player id. `HomeScreenViewModel` forwards it, and the sheet shows the delay button for
+  a player in the map only.
 - **Play requests**: send every `player_queues/play_media` through `PlayDispatcher` (`data/play/`). Do not send it
   from a screen or from a car surface directly. The dispatcher runs each request in an app scope, because the server
   answers only after playback starts, and that can take tens of seconds. It sends one request for each queue at a
   time. It drops a double tap, and a new "play" or "replace" request replaces a waiting one (`coalesce`).
+  Before a request leaves, the dispatcher calls `LocalPlayerAdapter.prepareQueue` with the queue id. For the local
+  player, that lifts the hold and brings the audio link up first (see the link policy in the Sendspin section).
   `busyQueueIds` gives the queues that have a request in progress or waiting. `PlayerData.playRequestPending`
   joins it with the server flag `extra_attributes.play_action_in_progress` (any client), and `PlayerControls`
   shows a ring around the main button while it is true. Read the server flag from the server queues, because the
@@ -105,6 +121,22 @@ actual class PlatformFeature {
   and not of an audiobook. "Play from here to latest" is `PlayFromHere` in `ClickContext.PODCAST`, the episodes
   tab of a podcast. The car bulk action `PLAY_SHUFFLED` has no schema gate, so a server before the flag plays
   the container in order.
+- **Play deep link**: `musicassistant://app/play?uri=<uri>` and `https://www.music-assistant.io/app/play?uri=<uri>`
+  play a media item. `uri` is a Music Assistant media uri, for example `library://radio/12`. `player` is optional.
+  It takes a player id, a player name, or `local` for the built-in player of the device. Without it, the link
+  uses the selected player. `option` is optional and takes a queue option (`play`, `replace`, `next`, `add`,
+  `replace_next`). The default is `replace` ("Play now"). `DeepLinkBus` ignores a link without a uri or with an
+  unknown option. `HomeScreenViewModel.playDeepLink` waits up to 10 s for the player, then selects it and sends
+  the request through `PlayDispatcher`. If the player does not come, the app shows a toast and plays nothing.
+  A server error shows the usual error toast. "Copy play link" (`copyPlayLinkMenuOption`) copies the link
+  (`DeepLinkBus.playLink`). In the menu of the item page, the link has no player. In the menu of the expanded
+  player, the link plays the current item on that player. It names the built-in player as `local`, because its
+  id is different on each install, and it names every other player by its id.
+- **App and Universal Links**: the app claims `https://www.music-assistant.io/app/*` only. The apex domain
+  redirects to `www`, and Android and iOS do not follow a redirect when they get the association file. So do not
+  add the apex domain to the manifest or the entitlements, because the check of that host fails. Before
+  Android 12, one failed host makes all hosts of the intent filter fail. See `.claude/deep-links.md` for all
+  link routes, the flow and the tests.
 - **Favorites**: from server 2.11 (`sendsFavoriteUpdates`), a favorite belongs to one user. The server
   sends null `favorite` in every `media_item_*` event, and sends the state of the user in `favorite_updated`.
   That event has no item body, so `MediaItemRepository` fetches the item and emits
@@ -143,12 +175,28 @@ actual class PlatformFeature {
   because a refresh does not change the favorite. Then it emits `refreshed`. The page replaces its item
   from `refreshed` by uri, because a substitute has no mapping in common with the unavailable item.
   The command changes the listings of the item, so the sub-items load again.
+- **Playlist import and export**: `PlaylistTransfer` (`data/repository/`) sends `music/playlists/export_playlist`
+  and `music/playlists/import_playlist`, like the web frontend. The server parses and writes the M3U text.
+  "Export playlist" is in the menu of a library playlist page, because the server exports a library playlist
+  only. The app writes the text to a `.m3u8` cache file and gives it to the share sheet (`FileSharer`, one
+  implementation for each platform). The Import button in the Playlists list needs `library.write`. It opens the
+  platform file picker (`rememberPlaylistFilePicker`). On iOS the picker offers the `.m3u` and `.m3u8` types.
+  Android filters by MIME type only, so its picker also offers text and binary files, because some providers
+  report an M3U file with these types. The app checks for the `#EXTM3U` header. The buttons show in every list
+  state, also when the list is empty. The app reads 3 MiB at most, because the server reads a WebSocket message of 4 MiB at
+  most. `ImportPlaylistDialog` offers the searchable music sources and, from server 2.11
+  (`supportsPlaylistMatchPolicy`), the match policy. If the user keeps all sources, the request sends no
+  source list, so the server searches all sources. The server matches the tracks in a background task after
+  the answer, and the list gets the new playlist from the `media_item_added` event.
 - **Item metadata**: the item details page shows the long text of the item under the header, like the
   web frontend: the biography of an artist (`metadata.description`), the review of an album
   (`metadata.review`, or its description), and the description of a playlist, a podcast or an
   audiobook. `AppMediaItem.itemDescription()` (`model/client/ItemDescription.kt`) selects the text
-  and `toPlainItemText` makes plain text from the Markdown and HTML that a provider sends. The page
-  clamps it to 3 lines, and "More" opens a sheet. The facts line shows the album type, the track
+  and `toItemText` makes plain text from the Markdown and HTML that a provider sends. It keeps the
+  links (`ItemLink`): an HTML anchor, a Markdown link and a bare URL. It keeps only the http, https
+  and mailto schemes, because the text comes from a provider. The page clamps it to 3 lines, and
+  "More" opens a sheet. A link works in the clamped text and in the sheet, because a short text
+  has no sheet. The platform `UriHandler` opens a link in the system browser. The facts line shows the album type, the track
   count and the total time (`PlayableSummary`, a client sum of the loaded tracks, none for a dynamic
   playlist), the publisher of an audiobook, and the music services of a library item. The genre chips
   come from `music/genres/genres_for_media_item`, which maps genres to library items only, so an
@@ -181,6 +229,27 @@ actual class PlatformFeature {
   type, so a stored choice does not narrow the podcast or audiobook genres. The episodes tab of a podcast has its own played filter
   (`PlayedFilter`, one setting for all podcasts). The app sends `fully_played=false` and filters the
   answer as well, because a 2.10 server ignores the argument.
+- **Artist rows**: `ArtistDetailsViewModel` gives a singer the rows Top tracks, Albums, Singles & EPs,
+  Appears on and Discography, like the web frontend. Albums and Singles & EPs list the same sources: the
+  library first, then each provider instance. `FetchArtistItemsUseCase` fetches each source once, and
+  `ArtistReleases` splits the answer on the client by `album_type`, so the split works on server 2.10.
+  An `ItemList` keeps its `releases`, and `ItemList.select` applies them to "View all" too. Appears on
+  (`music/artists/artist_appears_on`) and Discography (`music/artists/discography`) need server 2.11
+  (`supportsArtistAppearsOnAndDiscography`) and a library artist. The discography shows all release
+  types. A release that no music provider has is an external `Album` (see External items). It is
+  not playable, so the row dims it and its menu offers "Add to library" only. A tap opens the item
+  page. An author or a narrator keeps the rows In library and All audiobooks.
+- **External items**: from server 2.11, the server lists an item that it knows only by an external
+  id, such as a MusicBrainz id. The item has provider `external`, the `item_id`
+  `<id type>:<id>` and no provider mappings (`AppMediaItem.isExternalItem`). A discography album
+  and a top track of an artist can be external, and so can the album of an external track. The
+  server looks an external item up when it is opened or played. From server 2.11
+  (`supportsExternalItems`), `ItemDetailsViewModel` loads every external item with `music/item`,
+  which answers the item that the server found. An external album is not playable. An external
+  track keeps the `is_playable` of the server, and a play request sends its uri. Until the server
+  finds it, an external item has no favorite (`canBeFavorited`), no playlist entry
+  (`supportsAddToPlaylist`) and no refresh entry. It is not in the library, so the menu offers
+  "Add to library", which sends the uri.
 - **Providers**: `ProviderRepository` (`data/repository/`) owns the `providers` list. Read
   `providers` from it. Do not send `Request.Provider.all()` from a screen. It loads the list once
   for each session and again on each `providers_updated`. It does not use the event payload,
@@ -197,6 +266,30 @@ actual class PlatformFeature {
   target for each streaming service (its domain), and one target for each other provider instance.
   An empty choice searches everything. A genre-only search sends `library` only. The choice is saved
   before the search starts, and the search reads the sources when it starts, not from the screen state.
+- **Party**: the Party plugin (`party`, checked on server 2.10.9 and 2.11) lets guests add songs to one queue from
+  the web frontend. The app has the host side only. The sidebar category `LibraryCategory.PARTY` sits in
+  System while an available `party` provider is in the `providers` list (`PartyRepository.available`). It
+  opens `PartyInviteSheet`, which loads `party/url` and `party/config`. A null URL means that guest access
+  is off. `QrCode` (`ui/compose/common/`) draws the join URL.
+
+  A user with `config.providers.write` also gets the host settings. The plugin is not a music source that
+  a member owns, so `config.providers.own` is not enough. The guest access switch is the party on/off
+  switch, and it saves at once. The core fields are mode, player, party name, QR text, link duration and
+  karaoke. While the party is off, the host sets it up, and turning the switch on saves the edits in the same
+  save. An invalid edit blocks the switch. While the party is on, the QR comes first and the fields fold away
+  with their own Save button, because turning the party off revokes every guest token and join code. `PartyRepository` reads them with `config/providers/get` and saves only the changed keys
+  with `config/providers/save`. The server sends the labels in the language of the connection. A field
+  follows the `depends_on` of its entry, so the player shows in venue mode only.
+
+  A save reloads the plugin. The server sends `providers_updated` when the plugin unloads, and again
+  when it is loaded and has its commands. So the open sheet loads again on each `providers_updated`, and
+  a failed load keeps the last answer. The plugin reads the new config before the reload, so the sheet
+  loads the invite again right after a save. The guest side stays in the web frontend, because the server
+  lets a guest control every player. See `.claude/party-guest-investigation.md`.
+- **Volume keys**: on Android, an opt-in setting gives the hardware volume keys to the selected remote player
+  while the app is on screen. `MainActivity.onKeyDown` asks `VolumeButtonService.onVolumeKey`, which
+  sends the slider step commands through `RemoteVolumeTarget` (`MainDataSource`). The media session does not
+  change. See `.claude/volume-control.md`.
 - **Play history**: the server sends `playlog_updated` to all users. Ignore an event with the
   `userid` of a different user. A null `userid` applies to all users. The home screen loads its
   rows again 1.5 s after the last event, like the web app.
@@ -210,17 +303,64 @@ actual class PlatformFeature {
   "Other episodes" tab (`ItemDetailsTab.OTHER_EPISODES`) lists the podcast episodes without the open one, with
   the sort of the podcast page. The menus reach the page with "Go to episode" (`navigationOptions`). The page
   shows the `description` as "About this episode". From schema 81 (`supportsEpisodeTranscript`, server 2.11),
-  `TranscriptRepository` (`data/repository/`) loads `music/podcasts/podcast_episode_transcript` once for each
+  `LyricsRepository` (`data/repository/`) loads `music/podcasts/podcast_episode_transcript` once for each
   episode in an app scope and keeps the last answers, because the page and the player ask for the same
   episode. The answer is a `[text, cues]` tuple, and `transcriptOf` (`model/client/Transcript.kt`) makes a
   `Lyrics` from it, so `LyricsSheet` shows a transcript with the lyrics timing and offset. The page keeps it
   in `State.lyrics` and offers "Transcript" in the menu once it is loaded. The expanded player loads the
   transcript of the current episode and shows it behind the lyrics button. An episode whose provider reports
   `has_transcript` false is not asked. The page has no steppers and no hide-fully-played filter.
+- **Track lyrics**: `LyricsRepository` (`data/repository/`) provides track lyrics and episode transcripts.
+  Item Details and Now Playing use the same results and pending requests.
+  Use lyrics from track metadata when available. Otherwise, request lyrics from the server.
+  The server selects the lyrics provider. The expanded player shows the Lyrics button when lyrics are available.
+  A delayed response cannot replace lyrics for a different track.
+  Requests continue when the user changes screens. A failed request can be tried again.
+- **Seek bar waveform**: `audio_analysis/wave_form` gives 1800 RMS bins (0.0 to 1.0) for the whole track,
+  or null if the server has no analysis. The command needs schema 36 (`supportsWaveform`). The request
+  uses the stream ids (`StreamDetails.item_id` and `provider`), because the server stores the analysis
+  under them. `QueueTrack.waveformKey` gives the key, and it is null for an item that is not a track,
+  like in the web frontend. `WaveformRepository` (`data/repository/`) keeps one waveform for each queue: the
+  waveform of its current track. A load for a different track replaces it, and the repository drops an
+  answer that comes after the queue changed its track. So the waveform of a playing track always stays.
+  The load runs in an app scope. The expanded player loads it only while the local setting
+  `SettingsRepository.showWaveform` is on. The setting is off by default and the player menu has the
+  toggle. The setting is not the `show_waveform` preference of the web, because a user can want the
+  waveform on one surface only. `WaveformTrack` draws the bars in the slider track. A disabled timeline
+  keeps the plain track.
 - **Queue origin**: `QueueTrack.origin` is the container that the item was played from, from server
   2.11. It is null on an older server, for a single track and for a live stream. The stream details
   dialog shows it. It opens the container only if `opensItemDetails` is true. Add a type to
   `opensItemDetails` when `ItemDetailsViewModel.getItemById` loads it.
+- **Player sources**: a player can play a source that is not its queue: a live input (Spotify Connect, AirPlay,
+  the device audio source) or an input of the device (a TV input). `Player.sources` holds the `source_list` of
+  the server, and `Player.activeSource` holds the id of the active source. The queue of the player is the entry
+  with the player id. `Player.externalSource` is the active entry if it is not the queue. A sync child names the
+  queue of its leader, which is not in its own list, so it has no external source. A uri that the server does
+  not list becomes a passive entry with no controls, so the player offers Stop only.
+
+  A player on an external source has no queue. `mergePlayerDataList` gives it no queue, also not the queue of
+  before the source. The controls follow the flags of the source, like the web frontend. `transportState` and
+  `mainTransport` (`PlayerControls.kt`) are the one place for the buttons: `canPlayPause` gives Pause or Stop,
+  and `canNextPrevious` gives the skip buttons. A stopped source that is not passive accepts Play, because the
+  server selects it again. `PlayerData.canSeekContent` gives the seek rule to the timeline and to the Android
+  media session. The page shows the source name as the title if the media has no title. The position of an
+  external source comes from `current_media` of the player (`PlayerMedia.timing`), because the source has no
+  queue. `externalSourceTimings` gives it to `PlayerPositionTracker.setSource` under `Player.sourcePositionKey`,
+  which is not a queue id. Read the position of a player with `PlayerData.positionKey`, which covers the queue
+  and the external source. The timeline and the Android media session read it. The position uses the server
+  time of the report, so a wrong device clock moves it. The iOS lock screen shows no position for a source.
+
+  The menu of the expanded player has "Select source" (`Player.sourceChoices`): the entries that are not
+  passive and the active entry, sorted by name. The entry shows only if the list has more than one choice and
+  the player is not a sync child. The local player and the target of a device audio share get no entry. A
+  choice sends `PlayerAction.SelectSource`, which is `players/cmd/select_source`. The player id selects the
+  queue again. The car surfaces have no picker. An older server makes a live input the current queue item
+  (`AudioSource`), and that path does not change.
+- **Queue end**: when a queue plays to its end, the server keeps `current_index` and `current_item` on
+  the last item and sets `ended` (every server 2.x that the app supports). `QueueInfo.activeItemId` gives
+  null for an ended queue. The queue list marks every row as played and shows "Playback finished". Use
+  `activeItemId`, not `currentItem`, to find the row that plays now.
 - **In-list filter**: `List.clientFiltered(query)` (`model/client/QueryFilter.kt`) filters loaded
   items on the client. Derive the visible list as raw → filter → sort in one place.
 - **Announcements**: `AnnouncementRepository` (`data/announcement/`) runs both kinds in an app scope,
@@ -228,6 +368,43 @@ actual class PlatformFeature {
   `message`. Voice has no upload endpoint: raw s16le PCM streams live over `/live_announcement`
   (WebSocket) or the `live_announcement` data channel (WebRTC). Closing the link ends the clip, so
   never cancel a session early. The platform microphone is the `MicrophoneCapture` Koin binding.
+- **Device audio source**: on Android 10 and newer, the app sends the audio of other apps to the server, and the
+  server plays it on a player. The device is then a live input: the local player offers the Sendspin `source@v1` role
+  on its own connection, only while a share runs. `DeviceAudioShare` (`data/share/`) is the platform capture, and
+  `DeviceAudioSource` gives its `SourceConfig` to `LocalPlayerAdapter`. iOS has no playback capture.
+
+  `DeviceAudioRouter` owns a share. Only the server starts the stream. So the router waits until the server accepts the
+  source, then sends a `PlayRequest` for the source uri (`sendspinSourceUri`) through `PlayDispatcher`. The server
+  lists a client as a source only after the first `client/state` of the client. Before that, the server cannot find
+  the source uri and rejects the play request. So `SourceStatus.Ready` comes only after the module sent that report.
+  The report and the play request use different connections, so the router also asks the server with
+  `music/verify_item_uri`. It sends the play request only after the answer is true. If the answer stays false for
+  5 s, the share ends.
+  The handshake does not give the revision of the role. The router starts with `SourceDialect.SPEC`, and tries `RC1`
+  if the status is `Refused`. That restarts the audio link one time. A share ends when the user stops it, when the
+  system ends the capture, when the server stops the stream, or when the audio link drops. The roles go in
+  `client/hello`, so the start and the end of a share restart the audio link.
+
+  The server keeps the device as the active source of the target after a stop. So the end of a share sends
+  `players/cmd/select_source` with the id of the target, and the target gets its queue again. While a share runs,
+  `LocalPlayerAdapter.wantsSession` is true, because the user is then in the app that plays, and the share needs
+  the MA session.
+
+  Find the feature from the provider list (`sendspinSourceInstanceId`), not from the schema: the `sendspin_source`
+  plugin, or a `sendspin` provider with the `audio_source` feature. The role needs `WireVersion.SPEC_1_0`.
+
+  On Android, `DeviceAudioShareService` (type `mediaProjection`) holds the projection, and `PlaybackCapture` records
+  with `excludeUid` of the app, so the local player never feeds the source. The service mutes the media stream for the
+  share, because the device plays the audio about 2 seconds before the player. It unmutes the stream at the end. The
+  start needs the record permission and the capture consent for each share (`rememberDeviceAudioShareLauncher`).
+  `DeviceAudioShareDialog` tells the user first. A refusal starts nothing.
+
+  `DeviceAudioShareUi` gives the UI rules. The menu of the expanded player has "Play device audio here". The device
+  and a group that has it are not a target. The entry is disabled while the local player plays. While a share runs,
+  the menu has "Stop device audio", and `SharedDeviceInfo` covers the local player page. The artwork of the
+  target shows `DeviceAudioIcon` instead of the type icon. The target comes from the server:
+  the player whose
+  active source is the source uri, or the queue whose current item is the `AudioSource` with that uri.
 - **AI Radio**: The client supports server schema 88 and higher only (`supportsAiRadio`). Both gates,
   `MainDataSource.aiRadioAvailable` and `aiRadioQueueDjAvailable`, need it. A station is a finite
   Radio item (`ai_radio://radio/<station_id>`, `ServerAiRadioStation.uri`). Play it through
@@ -244,6 +421,22 @@ actual class PlatformFeature {
   It also sends `RESYNC` when the command session comes back, because the server does not send
   again the hints that the client lost. The queue DJ menu (`QueueDjViewModel`) and the stations
   screen show their cache and use only these changes. A show on a queue does not lock the queue DJ.
+
+## Session Lifecycle
+
+- `api/SessionMachine.kt` holds the connection lifecycle of the MA session. `transition` is a pure
+  function: it takes the `Lifecycle`, the `SessionState` and one `SessionEvent`, and it gives the next
+  `Lifecycle` and a list of `Effect`. Add or change a lifecycle rule there, and add a test to
+  `SessionMachineTest`.
+- `KtorServiceClient.dispatch` runs the transition and the effects under one lock, on the thread of
+  the caller. So a caller sees the new state before it continues. Many callers need this, for example
+  Android Auto, CarPlay, the local player queue and `LocalPlayerEndpoints`. Do not move the lifecycle
+  to a separate coroutine. An effect must not suspend or block.
+- `Publish` comes before `FailAll` in each transition. A request that fails must find the session
+  not ready, or the command queue sends the request again on the dead socket.
+- Each transport has a generation number (`Lifecycle.gen`). The machine ignores a transport event
+  or a watchdog event with an old number.
+- The auth fields of `ConnectionData` are not part of the machine. The client changes them in place.
 
 ## HTTP Clients
 
@@ -268,10 +461,24 @@ actual class PlatformFeature {
 ## Compose Guidelines
 
 - Material3 components
-- Extract reusable composables to `ui/common/composables/`
+- Extract reusable composables to `ui/compose/common/`
 - Use `remember`/`derivedStateOf` for computed values
 - Split large composables into smaller files by meaning
 - Previews only when explicitly requested
+- **Accent color**: `AppTheme` takes an `AccentColor` (`ui/theme/AccentColor.kt`). `DEFAULT` keeps the hand-made schemes in
+  `Theme.kt`, so a user who does not touch the setting sees no change. A seeded entry makes a Material 3 tonal spot scheme
+  with MaterialKolor, and `WALLPAPER` reads the Material You scheme (`wallpaperColorScheme`, Android 12 and newer, null on
+  iOS). `withPrimaryGroupOf` copies only the primary roles and the surface tint into the default scheme. The secondary,
+  tertiary and neutral roles never change, so the favorite heart (`favoriteTint`, tertiary) and the surfaces keep their
+  colors. `ThemeSetting.isDark()` resolves the light or dark choice. The settings picker (`AccentColorSection`) shows one
+  swatch for each accent that `accentColorScheme` can give on the platform. CarPlay tints its browse icons with
+  `accentPrimary` through `KmpHelper.carPlayAccent`, read on each connect.
+- **Sidebar sections**: the sidebar has three sections: Explore (Discover, Search, Browse), Library and System.
+  `LibraryCategoriesViewModel` stores one config for all categories, which includes Browse. Browse can be hidden
+  but it does not move, like in the web frontend. In edit mode, a `Section` with `reorderable` gets drag handles,
+  and an item moves only inside its section. Only the Library section is reorderable. The editor sends a
+  `SidebarEdit`, and `applySidebarEdit` saves it. A category that the server hides (AI Radio, Party) keeps its slot.
+  Party sits in System and can be hidden like Browse. The car tabs never hold it.
 - **Device chrome**: `DeviceChrome` (`ui-utils`) is the window geometry that the platform reports. It holds the area
   of the system vertical bar, the hinge of a book-style foldable and the fold. Read it from `LocalDeviceChrome`, which
   `App` provides. Only iOS gives a value, from iOS 27.1 (iPhone Duo). The probe in `ContentView.swift` reads it from
@@ -287,6 +494,19 @@ actual class PlatformFeature {
   In one test series on iPhone Duo (iOS 27.1), the hinge sent updates during each movement. The series did not show
   if the hinge can miss an update. On other devices each value is null and the layouts do not change. A test gives a
   value with `App(deviceChrome = …)` or `LocalDeviceChrome`.
+- **Item artwork**: `MediaArtwork` (`ui/compose/common/items/`) draws the artwork of every item but an artist:
+  a square with 8 dp corners and the type icon as the placeholder. `AppMediaItem.defaultIcon` gives the icon
+  of each type. An artist is a circle (`ArtistImage`), and its grid labels are centered. Do not add a custom
+  shape or an overlay for a type. A grid tile puts the badges 2 dp inside the artwork, one for each corner:
+  the type at the top start (not on an artist), the explicit mark at the top end, the provider icon or the
+  favorite heart at the bottom end, and the played state at the bottom start. The item page header has the
+  same corners without the type. A row image has no badge, because it is too small. A row shows the badges
+  in a line under the labels (`RowBadges`, the `badges` slot of `RowItem`): type, provider or favorite,
+  explicit, played state. The AI Radio station row shows the category icon in that line.
+  An artist has no type badge, because its round image tells the type, and its provider icon or favorite
+  heart sits at the bottom center of the circle, in the grid and in the item page header.
+  The type chip of an item that plays on tap (`AppMediaItem.playsOnTap`) is filled, and the chip of an item
+  that opens its page is translucent.
 - **Stacked rows**: `CategoryRow` (`ui/compose/common/items/`) shows a row of tap-to-play items as list items, two
   in each column. The other rows show one row of grid tiles. A tap-to-play item is a track, a podcast episode or a
   radio station (`playsOnTap`). An audiobook is not a tap-to-play item, because its tile opens the item page. The
@@ -296,6 +516,32 @@ actual class PlatformFeature {
 
   The placeholders that show while a row loads are always grid tiles. So a stacked row gets shorter when its items
   load, and the rows below it move up. This is a known limit.
+
+- **Multi-select**: a screen that gives an `ItemSelection` through `LocalItemSelection` gets
+  "Select multiple" at the top of the menu of a track row and of a podcast episode row
+  (`PlayableItemWithMenu`). These screens give one: the album, artist, playlist, podcast and episode
+  pages, and the artist "View all" list of tracks. A track and an episode can be in one selection,
+  because the bulk actions apply to both in the same way. Other rows (a radio station, an audiobook)
+  are not selectable. While the mode is on, a tap selects or deselects an item, and a long press does
+  nothing. A row that is not selectable ignores taps and long presses. An item without a uri, or that
+  does not play, cannot be selected.
+
+  `SelectionBar` replaces the top bar of the screen. It shows the count, "Select all", the actions
+  menu and a cancel button. Back ends the mode. "Select all" selects the items that the screen shows,
+  in list order. Each screen gives them once with `SelectableItems`, at a level that stays in the
+  composition when the list scrolls. The button shows only while a shown item is not selected.
+
+  The menu has the five queue options and "Add to playlist" (`resolveSelectionActions`,
+  `library.write`). A queue option sends all items in one `play_media` request, and "Add to playlist"
+  sends one `add_playlist_tracks` request. Both keep the order of selection. There is no bulk "Mark
+  played", because the server has no bulk command for it. An action ends the mode. The mode also ends
+  when the last item is deselected.
+
+  `SelectionKey` says which rows are the same item. A playlist can hold one item more than once, so
+  its selection keys on the server `position`, and the other lists key on the uri. On an editable
+  playlist, the menu also has "Remove from playlist". It asks for a confirmation, then it sends all
+  positions in one `remove_playlist_tracks` request. The server removes them from the highest position
+  down, so each position stays correct. Spotify removes by uri, so it removes every copy of a track.
 
 ## State Management
 
@@ -332,15 +578,9 @@ fun FeatureScreen(viewModel: FeatureViewModel = koinViewModel()) {
 
 ## UI Architecture
 
-**IMPORTANT**: The project is transitioning from the old MainScreen/MainViewModel to the new HomeScreen/HomeScreenViewModel architecture.
-
-- **Deprecated (do NOT use)**: `MainScreen.kt`, `MainViewModel.kt`
-- **Current (use these)**: `HomeScreen.kt`, `HomeScreenViewModel.kt`
-
-When implementing new features or integrations:
-- Use `HomeScreenViewModel` as reference for architecture patterns
-- Add dependencies to `HomeScreenViewModel` in `SharedModule.kt`
-- Do NOT modify `MainViewModel` - it's legacy code being phased out
+- `HomeScreen` and `HomeScreenViewModel` (`ui/compose/home/`) are the main screen and its ViewModel. Use them as
+  the reference for architecture patterns.
+- Add dependencies of `HomeScreenViewModel` in `SharedModule.kt`.
 
 ### Sendspin Integration
 
@@ -351,6 +591,9 @@ The built-in player is the `:sendspin-kmp` Gradle module (`io.music_assistant.se
 - `state: StateFlow<PlayerState>` is `Disabled`, `Connecting`, `Connected`, `Reconnecting`, or `Failed`. `Connected` carries the player id, the server name, the clock quality, and the audio status.
 - `events: Flow<PlayerEvent>` carries `PlaybackStarted`, `PlaybackStopped(cause)`, `ServerRefreshNeeded`, `FocusRegained`, and `Warning(code)`.
 - `hold(held)` is the local pause. While held, the player is silent and discards the audio that it gets, with no server round trip. `LocalPlayerAdapter` holds on every local Pause. It releases on every play intent: a local Play, Next, Previous or seek, a `PlayDispatcher` request or a queue-item tap for the local player. It also releases when the server reports that the player is not playing. A `stream/start` while held gives `StreamStartedWhileHeld`, and the adapter sends the pause again. A Play that releases a hold sends a pause before the play, so the server starts a new stream. `LocalCommandQueue.sendOrDrop` sends Play, Next, Previous and seeks. It waits up to 10 s for the session and for the queued commands, then it sends the command or drops it. It never queues them. A `Starved` stop (the buffer ran dry while the audio link was down) is the same local pause, and the player never resumes on its own. The adapter reports `wantsSession` while the player plays or a hold waits for the server, so `MainDataSource` keeps the MA session alive: it stays `Reconnecting` instead of `Disconnected.Backgrounded` until the server confirms the pause.
+- `checkConnection()` asks for a connection check. `LocalPlayerAdapter` calls it on each app foreground (`ServiceClient.foregroundEvents`). A long background can leave the player in a 30 s backoff, or on a dead link that the clock probe finds only after about 20 s. After a check, a waiting reconnect starts at once from attempt 0. A connected player sends a probe burst at once. While the bursts after a check stay silent, the next burst starts with no wait, so a dead link ends after 3 probe timeouts (4.5 s). Without a check, the stall tolerance does not change. A check during a connect attempt ends the backoff that follows the attempt.
+- Server-started playback: the audio link lives with the process, so the server can start a stream on the phone while the MA session is torn down in the background. `wantsSession` then calls `onPlaybackActive`, which reconnects a `Backgrounded` session like a car host does, so the events arrive and the app shows the playback. Android starts the media service on the next foreground, because Android 12 forbids a foreground-service start from the background, and the OS may kill the process before that. Local commands need the MA session and a `Connected` player, because the server drops a command for a player it cannot reach: the command queue waits for both. `prepareQueue(queueId)` is the one entry for a play intent that is not a `PlayerAction` (`PlayDispatcher`, a queue-item tap): for an owned queue it lifts the hold and waits for the connection.
+- The server hides the phone by default (`hide_in_ui`), so `MainDataSource` looks the local player up in the full `players/all` list and forwards its server state to the adapter whether or not the server lists it (`forwardLocalPlayer`). `LocalPlayerAdapter.ownsQueue` names the local player by its id, its own queue id, or the queue it is synced to, and every queue event for one of these goes to the adapter. `mergePlayerDataList` builds the local entry from the adapter only, with its sync parent from its own server state. Grouping follows the web frontend: only a listed player is a child candidate or offers children. So a server user who un-hides the phone can group it from the web, and the app then offers the phone in every group dialog and lets it lead a group (`SelectPlayerSheet` shows its group button). A hidden phone takes no part in grouping.
 - Ports the app implements: `AudioSink`, `DecoderFactory`, `SendspinKeyStore`, and `Endpoint.WebRtc.openChannel`. On Android the module has the sink, the decoders, the audio dispatcher (`sendspinAudioDispatcher`), the clock (`ElapsedRealtimeClock`) and the online flow (`connectivityOnline`), in package `io.music_assistant.sendspin.android`. That package uses `api` only. The app keeps `SettingsSendspinKeyStore`, because a different store would lose the existing player identity.
 - The app depends on `sendspin.api` and the root factory only. Every other declaration in the module is `internal`, so the compiler rejects a new leak. The module compiles in explicit API mode. `sendspin-kmp/api/sendspin-kmp.klib.api` is the committed public API, checked by `checkKotlinAbi`; after an intended API change run `./gradlew :sendspin-kmp:updateKotlinAbi` (macOS). The Noise primitives are a private default of the composition root, not an app port.
 
@@ -358,14 +601,17 @@ The built-in player is the `:sendspin-kmp` Gradle module (`io.music_assistant.se
 
 **App side** (`composeApp`):
 - `data/LocalPlayerAdapter` owns the player and everything about the MA player model: optimistic UI, the offline command queue, and server event reconciliation. `LocalPlayerFactory` builds the player from the platform ports (sink, decoders, key store), so a test gives the adapter a fake player (`LocalPlayerAdapterTest`).
-- `data/LocalPlayerEndpoints` derives the endpoint from the MA session. A WebRTC session gets the data channel. A direct session gets the proxied WebSocket at `<wsUrl>/sendspin`, or the custom Sendspin server from settings. A reconnecting MA session keeps the last endpoint. Each Sendspin connection attempt needs a new data channel. From server schema 49 (`LABEL_ROUTED_CHANNELS_SCHEMA`), the app opens it in-band on the live peer, so the MA session continues. On an older server, or if the new channel does not open, the app renegotiates the peer connection.
+- `data/LocalPlayerEndpoints` derives the endpoint from the MA session. A WebRTC session gets the data channel. A direct session gets the proxied WebSocket at `<wsUrl>/sendspin`, or the custom Sendspin server from settings. The proxy needs the `auth` message before `client/init`, so the endpoint carries the MA token. The custom connection sends the token only while "Sign in through Music Assistant" is on (`SendspinConnectionAuth`). Turn it off for a plain Sendspin server, because the spec does not let a client send a message before `client/init`. A reconnecting or backgrounded MA session keeps the last endpoint. Each Sendspin connection attempt needs a new data channel. From server schema 49 (`LABEL_ROUTED_CHANNELS_SCHEMA`), the app opens it in-band on the live peer, so the MA session continues. On an older server, or if the new channel does not open, the app renegotiates the peer connection.
 - Sinks and decoders: Android uses `AudioTrackSink` and `AndroidDecoderFactory` from the module. On iOS, `player/local/` holds `AudioQueueSink` and pass-through `IosDecoderFactory` (the native player decodes).
-- The control plane stays on the MA REST API. Sendspin carries audio only (role `player@v1`).
+- The control plane stays on the MA REST API. Sendspin carries audio only: role `player@v1`, and role `source@v1` while the device audio is shared.
+- Spec 1.0.0-rc1 says that every client offers the Pairing PSK method. On `SPEC_1_0`, `NoiseSession` offers and accepts the pairing PSK always. The stored `pairing_psk_enabled` flag of a 9.x `management/set-pairing-config` applies to `LEGACY_9` only.
 - Only the Noise-encrypted protocol is supported. `supportsEncryptedSendspin(schemaVersion)` requires MA schema 45 or newer. A known lower schema produces `Endpoint.Unsupported`, and the player fails without opening a transport. A missing schema is inconclusive: endpoint selection permits a handshake rather than rejecting the server. An explicit unsupported wire version, and a `server/error` for an unsupported version or suite, fail terminally; network failures and handshake timeouts still retry.
 - The module speaks two wire dialects, `WireVersion` (`api`). `LEGACY_9` is aiosendspin 9.x (server 2.10.6 and older). `SPEC_1_0` is Sendspin spec 1.0.0-rc1, aiosendspin 10.x (server 2.10.7 and 2.11). `sendspinWireFor(schemaVersion, serverVersion)` selects `SPEC_1_0` from `SERVER_2_11_SCHEMA`, or from a 2.10 `server_version` with patch 7 or higher, because 2.10.7 keeps the 2.10 schema. All other servers get `LEGACY_9`, which includes an unknown server and a source build (`0.0.0`). The handshake does not give the server version: `server/init` has `version` 1 on both wires. `LocalPlayerEndpoints` puts the wire on the `Endpoint`, so a wire change restarts the connection. A 10.x server accepts the 9.x wire only while its hidden setting `allow_legacy_clients` is on, and it logs a "non-compliant client" warning for it. The differences on `SPEC_1_0`: Noise message 1 carries `psk_category`, and the client matches the PSK by id and category. On a miss in the initial handshake, the client completes with the Sentinel PSK, so the server can offer re-pairing. `client/hello` has no `trust_level`, no `supported_commands`, and `supported_pair_methods` is an object keyed by method. `client/state` carries `output_delay_ms`, `required_lead_time_ms`, `min_buffer_ms` and `supported_commands`. The player sends it after the clock converges and again when the delay changes, never periodically. An audio chunk header has 4 more bytes, `send_ahead`, which the client skips. Fragments use type 1 with a flags byte. A re-handshake has no hello exchange, and an activate without `active_roles` keeps the roles. The Pairing PSK flow sends `client/pair-init` with the pairing index before `client/pair-finalize`. `SendspinJson` omits null fields on both wires. `SendspinDeps.deviceInfo` (`DeviceInfo`) gives the product name, the manufacturer and the app version that the server names in its logs.
-- Spec 1.0.0-rc1 rules that the module obeys on both wires: the `client/hello` name and each `device_info` string are cut to 64 bytes of UTF-8 (`truncateUtf8`). `advertisedFormats` (`api/AudioFormatSpec.kt`) makes the supported formats, all stereo at 48 kHz: the preferred codec at `LocalPlayerConfig.bitDepth` (24-bit, then 16-bit, for FLAC and PCM), then 16-bit PCM, because every server must produce 16-bit PCM. Opus is always 16-bit.
+- Spec 1.0.0-rc1 rules that the module obeys on both wires: the `client/hello` name and each `device_info` string are cut to 64 bytes of UTF-8 (`truncateUtf8`). `advertisedFormats` (`api/AudioFormatSpec.kt`) makes the supported formats, all stereo: the preferred codec at `LocalPlayerConfig.bitDepth` (24-bit, then 16-bit, for FLAC and PCM) at 48 kHz, then FLAC or PCM again at 44.1 kHz, then 16-bit PCM at 48 kHz, because every server must produce 16-bit PCM. Opus is always 16-bit at 48 kHz. 48 kHz stays first, because a server that does not match the source rate sends the first format. From server 2.10.6, the server selects the rate of the first track of a playback session from the formats of the top codec (`follow_session_sample_rate`). So 44.1 kHz audio comes without a resample, with about 8% less data than 48 kHz. The server player config "preferred Sendspin format" sets one fixed format. The client has no rate setting. A rate change gives a `stream/start` with a new format, and the player builds a new sink.
 - Buffer: `LocalPlayerConfig.bufferSeconds` sets the buffer in seconds. `buffer_capacity` and the local byte cap are that many seconds of the heaviest advertised format (`estimatedBytesPerSecond`), so a fallback format gets the same time. The estimate counts FLAC as raw PCM, its worst case, and Opus as 16 kB/s. The settings screen shows the same estimate for the preferred codec. The server reads `buffer_capacity` only from `client/hello`, so a buffer change restarts the connection, and the local cap changes when a connection starts. A local cap below the advertised capacity evicts the future chunks that the server sends, and each evicted chunk is a gap in the audio. The `Stream stats` line counts these evictions.
 - 24-bit audio: the user sets it in the settings, and it applies to FLAC and PCM only (`SendspinPlayerSettings.effectiveBitDepth`). `supportsHiResAudio` gates it: Android 12 (API 31) or newer, and all iOS versions. The default is 16-bit. The client advertises 16-bit and 24-bit only, and `AudioFormatSpec` accepts no other depth. 24-bit audio already exceeds real DACs, and the Android mixer drops more bits. `DriftCorrector` resamples 16-bit and 24-bit packed PCM. On Android, `FlacDecoder` asks MediaCodec for float output on a 24-bit stream and converts it to 24-bit packed (`floatToPcm24`). The stock decoder makes only 16-bit or float, and the framework pads 16-bit output for a 24-bit request.
+- In-place stream start: a `stream/start` while a stream is active continues the same timeline (`StreamAction.Continue`). The player keeps the buffered chunks. `JitterBuffer` tags each chunk with the format that applied when the chunk arrived, and the scheduler decodes each chunk in its own format. If the decoded output keeps the sink format, the scheduler changes the decoder only, and there is no gap. If the sink format changes (sample rate, channels or bit depth), the scheduler waits until the old audio was heard, then it builds a new sink. The gap is the build time of the sink. The track continues, so the player does not send a second `PlaybackStarted`. Music Assistant uses this method in enqueue mode (Sendspin backlog#82).
+- Partial clear: a `stream/clear` with `from_timestamp` removes only the buffered chunks at or after that time (`StreamAction.ClearFrom`). Playback continues, and the player does not flush the sink or report a stop. The de-dup memory stays, so a resent chunk that is already in the sink is dropped. A `stream/clear` or a `stream/end` with a `roles` list that does not contain `player` does not touch the player.
 - Format change: the server builds the audio chain and the quality badge when a stream starts, and a reconnect starts no stream. So after a codec or bit-depth change, a playing local player pauses and plays when the new connection is active (`LocalPlayerAdapter.restartStreamOnFormatChange`). A seek is not used, because a seek fails on radio.
 - Codec default: a new install gets FLAC. `SettingsRepository` stores the default on the first read. An install that has a server or used the local player gets Opus, because Opus was the default before.
 - Spec 1.0.0-rc1 rules that apply on `SPEC_1_0` only: a JSON message that is not UTF-8, or that has no `type` string or no `payload` object, closes the connection (`ServerMessage.BadEnvelope`). An audio message shorter than its 13-byte header also closes it. A payload that does not decode into the client model (`ServerMessage.Malformed`) is not a protocol error, so the client ignores it. The 9.x wire ignores all of these.
@@ -377,14 +623,14 @@ Android foreground services integrate with Sendspin through MainDataSource:
 
 **MainMediaPlaybackService**:
 - Handles notifications and lock screen controls
-- Shows all active players (excluding deprecated builtin players)
+- Shows all active players
 - Accesses player state via `MainDataSource.playersData`
-- Uses `MediaSessionHelper` for MediaSession management and volume control (see `.claude/volume-control.md`)
+- Uses `SharedMediaSessionManager` for MediaSession management and volume control (see `.claude/volume-control.md`)
 
 **AndroidAutoPlaybackService**:
 - Provides Android Auto support via `MediaBrowserServiceCompat`
 - Shows first player with active playback (`queueInfo?.currentItem != null`)
-- Uses `playerData.queue` for queue access (not deprecated `builtinPlayerQueue`)
+- Uses `playerData.queue` for queue access
 - When Sendspin is playing locally, it appears in Android Auto
 - Supports library browsing via `AutoLibrary`
 - Shows a Home tab that copies the app home page. The tab has one browsable item for each
@@ -402,13 +648,13 @@ Android foreground services integrate with Sendspin through MainDataSource:
 
 **Key Pattern**: Services do NOT create or manage Sendspin directly. They access player data through MainDataSource's playersData StateFlow, maintaining a single source of truth.
 
-See `.claude/sendspin-integration-design.md` and `.claude/sendspin-android-services-integration.md` for detailed technical documentation.
+See `sendspin-kmp/README.md` for the player module.
 
 ## Misc rules
 
 - Don't ever use non-null assertions in live code (!!). Always handle nulls safely.
 - If code reads the `value` of a derived `StateFlow` after it writes the source, derive it with `mapState`
-  (`utils/StateFlowView.kt`). Do not use `map { }.stateIn(scope)` for it, because that value updates on
+  (`utils/StateFlowExt.kt`). Do not use `map { }.stateIn(scope)` for it, because that value updates on
   another coroutine and the read can get the old value.
 - Use Kotlin-like idioms (e.g., prefer `let`, `also`, `apply` for scoping).
 - Instead of `if-else` chains, prefer `when` expressions for better readability.

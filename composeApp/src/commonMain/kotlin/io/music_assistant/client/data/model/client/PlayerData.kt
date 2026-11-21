@@ -19,15 +19,34 @@ data class PlayerData(
     val queueId = queueInfo?.id
     val queueOrPlayerId = queueId ?: player.id
 
+    /** A bound child makes this a group for volume: the slider and the volume keys send group commands. */
+    val usesGroupVolume: Boolean
+        get() = childrenBinds.any { it.isBound }
+
+    /** The source that plays in place of the queue, or null while a queue plays. */
+    val externalSource: PlayerSource? get() = player.externalSource
+
+    /** The key of the playback position in `PlayerPositionTracker`: the queue, or the external source. */
+    val positionKey: String? get() = queueId ?: externalSource?.let { player.sourcePositionKey }
+
     /**
-     * False for a live input without pause support and for a radio stream, like the web app:
+     * False for a source without pause support and for a radio stream, like the web app:
      * the player then offers Stop instead of Pause.
      */
     val canPauseContent: Boolean
-        get() = when (val track = queueInfo?.currentItem?.track) {
-            is AudioSource -> track.canPlayPause
-            else -> player.currentMedia?.mediaType != MediaType.RADIO
+        get() {
+            val track = queueInfo?.currentItem?.track
+            val source = externalSource
+            return when {
+                track is AudioSource -> track.canPlayPause
+                source != null -> source.canPlayPause
+                else -> player.currentMedia?.mediaType != MediaType.RADIO
+            }
         }
+
+    /** False for a radio stream, and for a source in place of the queue that cannot seek. */
+    val canSeekContent: Boolean
+        get() = externalSource?.canSeek ?: (player.currentMedia?.mediaType != MediaType.RADIO)
 
     fun updateFrom(other: PlayerData): PlayerData {
         return PlayerData(
@@ -74,6 +93,8 @@ data class PlayerData(
         val volumeSliderAccessible: Boolean,
         val isMuted: Boolean?,
         val name: String,
+        /** The shared-icons id of the player, like [Player.icon]. */
+        val icon: String? = null,
         val isBound: Boolean,
         val isManageable: Boolean,
     )
